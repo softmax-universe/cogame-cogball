@@ -1,4 +1,4 @@
-# CI for a Coworld game repo (Metta-AI/cogame-cogball).
+# CI for a Coworld game repo (softmax-universe/cogame-cogball).
 #
 # Goes to:  .github/workflows/ci.yml  in the coworld repo.
 # Substitute: cogball  (lowercase game slug, e.g. bullwhip)
