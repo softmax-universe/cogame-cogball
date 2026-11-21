@@ -211,9 +211,21 @@ proc fallbackFor(
   seat: Seat,
   turn: int
 ): Directive =
-  ## The `formation` directive is the fallback for every failure mode.
-  result = sim.policyView().formationDirective(seat, turn)
-  result.source = dsFallback
+  ## Neutral hold fallback for scored LLM failures: every robot holds its
+  ## current position with `kickNever` instead of running `formationDirective`.
+  result = Directive(turn: int32(turn), source: dsFallback)
+  let base = firstRobotOf(seat)
+  for slot in 0 ..< RobotsPerSeat:
+    let robot = sim.robots[base + slot]
+    result.robots[slot] = RobotOrder(
+      role: roleBack,
+      intent: inHold,
+      targetX: robot.x,
+      targetY: robot.y,
+      passTo: -1'i32,
+      kick: kickNever,
+      say: ""
+    )
 
 proc turn*(
   engine: TurnEngine,

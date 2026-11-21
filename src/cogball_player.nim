@@ -180,12 +180,17 @@ when isMainModule:
     let
       prompt = getEnv("PLAYER_PROMPT").strip()
       scriptedEnv = getEnv("PLAYER_SCRIPTED").strip().toLowerAscii()
+      endpoint = getEnv("COWORLD_LLM_ENDPOINT").strip()
       label = getEnv("PLAYER_POLICY_LABEL").strip()
+      kind =
+        if prompt.len > 0: "prompt"
+        elif scriptedEnv.len > 0: "scripted"
+        elif endpoint.len > 0: "prompt"
+        else: "scripted"
     var scripted = ""
-    if prompt.len == 0:
+    if kind == "scripted":
       scripted = if scriptedEnv in ["formation", "swarm"]: scriptedEnv
                  else: "formation"
-    let kind = if prompt.len > 0: "prompt" else: "scripted"
 
     let registration = $ %*{
       "type": "register",
