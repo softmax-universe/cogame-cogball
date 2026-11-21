@@ -183,8 +183,9 @@ when isMainModule:
       endpoint = getEnv("COWORLD_LLM_ENDPOINT").strip()
       label = getEnv("PLAYER_POLICY_LABEL").strip()
       kind =
-        if scriptedEnv.len > 0: "scripted"
-        elif prompt.len > 0 or endpoint.len > 0: "prompt"
+        if prompt.len > 0: "prompt"
+        elif scriptedEnv.len > 0: "scripted"
+        elif endpoint.len > 0: "prompt"
         else: "scripted"
     var scripted = ""
     if kind == "scripted":
