@@ -132,6 +132,9 @@ proc exactlyOneRetry() =
   for seat in Seat:
     doAssert sim2.activeDirective[seat].source == dsFallback,
       "two consecutive parse failures did not fall back"
+    for robot in sim2.activeDirective[seat].robots:
+      doAssert robot.intent == inHold and robot.kick == kickNever,
+        "scored LLM fallback must hold position with kickNever, not scripted formation"
   var causes = 0
   for record in always.records:
     let node = parseJson(record)
