@@ -42,8 +42,8 @@ block playerFixture:
       let view = decision["observation"]
       var robots = newJArray()
       for robot in view["your_robots"]:
-        robots.add(%*{"id": robot["id"], "role": "wing", "intent": "hold",
-          "target": robot["pos"], "pass_to": newJNull(), "kick": "never", "say": ""})
+        robots.add(%*{"id": robot["id"], "intent": "hold",
+          "target": robot["pos"], "kick": "never"})
       let action = %*{"note": "wire action", "robots": robots}
       var evidence = newDecisionAttempt(decision["decision_id"].getStr() & "-" &
         $decision["seat"].getInt(), "trust-fixture", case attack

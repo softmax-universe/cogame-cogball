@@ -129,6 +129,7 @@ const
   MaxDirectiveRecordRunes* = 900
   MaxPromptRunes* = 4000
   MaxRobotIdRunes* = 8
+  NoTarget* = low(int32)       ## sentinel for omitted optional target on non-hold orders.
 
   AimBradsTurn* = 256          ## brads per full turn; ctf's convention.
   HeadingQTurn* = 4096         ## headingQ resolution: 1/16 brad.

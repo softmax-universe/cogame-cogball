@@ -423,13 +423,16 @@ proc registrationOf*(
     policy.operatorPrompt = parsed.node["prompt"].getStr()
     policy.kind = pkLlm
     policy.baseline = ""
-  else:
+  elif kind == "scripted":
+    if scripted.kind != JString:
+      return (false, previous, "")
+    let baseline = scripted.getStr().strip().toLowerAscii()
+    if baseline notin ["formation", "swarm"]:
+      return (false, previous, "")
     policy.kind = pkScripted
-    policy.baseline =
-      if scripted.kind == JString and scripted.getStr().len > 0:
-        scripted.getStr()
-      else:
-        "formation"
+    policy.baseline = baseline
+  else:
+    return (false, previous, "")
   policy.label = if label.len > 0: label else: policyKindText(policy.kind)
   # Only an actual policy change earns another record.
   let unchanged =
@@ -572,7 +575,9 @@ proc playerBatch(
             confirmEvidenceReceipt(issued.socket, frame.payload)
             if frame.payload["decision_id"] == %issued.id:
               result[position].error = "player stopped before action"
-          of pfRejected: result[position].error = "invalid player response"
+          of pfRejected:
+            result[position].error = "invalid player response"
+            result[position].cause = "parse_error"
           else: discard
         if not result[position].ok and result[position].error.len == 0: pending = true
       if not pending: break
@@ -673,7 +678,7 @@ proc runGameLoop(
     if runtimeConfig.config.len > 0: runtimeConfig.config else: "{}")), nil)
   for seat in Seat:
     engine.policies[seat] = SeatPolicy(
-      kind: pkScripted, baseline: "formation", label: "formation")
+      kind: pkLlm, baseline: "", label: "unregistered", connected: false)
 
   let trajectoryUri = getEnv(CogameSaveTrajectoryUriEnv)
   let capture = if trajectoryUri.len > 0 and not replayLoaded:
@@ -991,7 +996,7 @@ proc runGameLoop(
             # boundary. Turn 0 therefore fires on the first tick that has no
             # directive yet — otherwise the opening five seconds would be played
             # on the compiled-in default.
-            let opening = not (sim.hasDirective[Azure] and sim.hasDirective[Crimson])
+            let opening = engine.turnsIssued == 0
             if opening or elapsedTicks mod sim.turnTicks() == 0:
               let seconds = int((getMonoTime() - episodeStart).inSeconds)
               var seatSockets: array[Seat, WebSocket]
@@ -1045,6 +1050,10 @@ proc runGameLoop(
               engine.noteGoal(sim.tickCount, int(sim.lastGoalBy), seat)
           sim.stepEvents(broadcastTracker, frameEvents)
           if sim.phase == GameOver and sim.gameOverTimer <= 0:
+            if sim.endReason == reasonComplete and engine.hasAllGameLearnerOutage(sim):
+              echo "cogball: all-game learner provider/transport outage; marking episode failed"
+              sim.endReason = reasonFault
+              sim.endRule = erHostError
             # The `result` record is written at the very END, so its finalTick is
             # the same number results.json reports.
             if not resultRecordWritten:

@@ -14,6 +14,7 @@ var
   engine: TurnEngine
   views: array[Seat, JsonNode]
   chosen: array[Seat, Directive]
+  hasChosen: array[Seat, bool]
   decisionId: int
   actingSeat: Seat
   variant: string
@@ -130,6 +131,7 @@ proc reset(command: JsonNode): JsonNode =
   captureViews()
   decisionId = 0
   actingSeat = Azure
+  hasChosen = default(array[Seat, bool])
   rejectedAttempts = default(array[Seat, int])
   currentDecision()
 
@@ -141,11 +143,14 @@ proc directiveFor(choice: int, seat: Seat): Directive =
   if choice >= 2:
     var code = choice - 2
     for slot in 0 ..< RobotsPerSeat:
-      reply["robots"][slot]["intent"] = %intentText(Intent(code mod IntentsPerRobot))
+      let intent = Intent(code mod IntentsPerRobot)
+      reply["robots"][slot]["intent"] = %intentText(intent)
+      if intent == inPass:
+        let mate = firstRobotOf(seat) + ((slot + 1) mod RobotsPerSeat)
+        reply["robots"][slot]["pass_to"] = %robotId(mate)
       code = code div IntentsPerRobot
-  let parsed = game.parseDirective(seat, reply, engine.previous[seat],
-    engine.hasPrevious[seat], baseline, turn)
-  doAssert parsed.usable
+  let parsed = game.parseDirective(seat, reply, turn)
+  doAssert parsed.usable, parsed.reason
   parsed.directive
 
 proc step(command: JsonNode): JsonNode =
@@ -153,42 +158,47 @@ proc step(command: JsonNode): JsonNode =
     return %*{"kind": "rejected", "reason": "stale decision", "observation": currentDecision()}
   var action = newJNull()
   var consumed = false
+  var rejectionReason = ""
   if languageMode:
     let proposal = jsonProposal(command["response"].getStr())
-    let fallback = views[actingSeat].policyView(actingSeat).formationDirective(
-      actingSeat, game.currentTurn())
     let parsed = if proposal.ok:
-      game.parseDirective(actingSeat, proposal.node, engine.previous[actingSeat],
-        engine.hasPrevious[actingSeat], fallback, game.currentTurn())
-      else: (fallback, false)
+      game.parseDirective(actingSeat, proposal.node, game.currentTurn())
+      else: (Directive(), false, proposal.reason)
     if not parsed.usable:
+      rejectionReason = if parsed.reason.len > 0: parsed.reason else: "invalid directive"
       inc rejectedAttempts[actingSeat]
       if rejectedAttempts[actingSeat] < 2:
-        return %*{"kind": "rejected", "reason": "no usable directive",
+        return %*{"kind": "rejected", "reason": rejectionReason,
           "observation": currentDecision()}
-      chosen[actingSeat] = fallback
+      hasChosen[actingSeat] = false
       consumed = true
+      action = newJNull()
     else:
       chosen[actingSeat] = parsed.directive
-    action = actionJson(game, actingSeat, chosen[actingSeat])
+      hasChosen[actingSeat] = true
+      action = actionJson(game, actingSeat, chosen[actingSeat])
   else:
     action = parseJson(command["response"].getStr())
     let choice = action["choice"].getInt()
     doAssert choice in 0 ..< CandidateCount
     chosen[actingSeat] = directiveFor(choice, actingSeat)
+    hasChosen[actingSeat] = true
   rejectedAttempts[actingSeat] = 0
   inc decisionId
   if actingSeat == Azure:
     actingSeat = Crimson
     result = %*{"kind": (if consumed: "consumed_rejection" else: "accepted"),
       "action": action, "observation": currentDecision()}
-    if consumed: result["reason"] = %"no usable directive"
+    if consumed: result["reason"] = %rejectionReason
     return
   for seat in Seat:
-    game.activeDirective[seat] = chosen[seat]
-    game.hasDirective[seat] = true
-    engine.previous[seat] = chosen[seat]
-    engine.hasPrevious[seat] = true
+    if hasChosen[seat]:
+      game.activeDirective[seat] = chosen[seat]
+      game.hasDirective[seat] = true
+      engine.previous[seat] = chosen[seat]
+      engine.hasPrevious[seat] = true
+    else:
+      game.hasDirective[seat] = false
     engine.lastStats[seat] = game.stats[seat]
   engine.lastGoals.setLen(0)
   var
@@ -221,7 +231,7 @@ proc step(command: JsonNode): JsonNode =
       currentDecision()
   result = %*{"kind": (if consumed: "consumed_rejection" else: "accepted"),
     "action": action, "observation": observation}
-  if consumed: result["reason"] = %"no usable directive"
+  if consumed: result["reason"] = %rejectionReason
 
 when isMainModule:
   let args = commandLineParams()

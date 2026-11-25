@@ -70,8 +70,8 @@ then the raw payload) carrying:
   socket. The player runs inference and returns a directive. The game receives
   no model credential. Private `training_attempt` metadata carries the exact
   inference prompt, request, response, and actual native provenance.
-* `scripted` selects a built-in baseline; an unknown or absent value is
-  `formation`.
+* `scripted` selects an explicit built-in baseline (`"formation"` or `"swarm"`);
+  an unknown or absent value is rejected.
 * `policy` is a free label, capped at **48 runes**, recorded in the replay.
 
 The payload is read WITHOUT an ASCII filter, so a non-ASCII policy label
@@ -177,8 +177,9 @@ match.
 | `k` | fields |
 |---|---|
 | `register` | `seat`, `alias`, `policy` (≤48 runes), `kind` (`llm`\|`scripted`), `baseline` |
-| `directive` | `turn`, `seat`, `alias`, `source` (`llm`\|`scripted`\|`fallback`), `latency_ms`, `note`, `robots`:[{`id`,`role`,`intent`,`target`,`pass_to`,`kick`,`say`}] |
+| `directive` | `turn`, `seat`, `alias`, `source` (`llm`\|`scripted`), `latency_ms`, `note`, `robots`:[{`id`,`role`,`intent`,`target`,`pass_to`,`kick`,`say`}] |
 | `fallback` | `turn`, `seat`, `attempt` (1\|2), `cause`, `detail` (≤200 runes) |
+| `missed_turn` | `turn`, `seat`, `alias`, `cause` |
 | `budget_guard` | `turn`, `remaining_s` |
 | `result` | the full results document, written once at game over |
 

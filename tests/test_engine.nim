@@ -7,6 +7,7 @@ import cogball/prompts
 ## produce legal directives and pass every other test in this suite.
 
 import std/[json, monotimes, options, os, strutils, times]
+import bitworld/decision_trajectory
 import lib/helpers
 import cogball/server
 import cogball/replays
@@ -21,9 +22,22 @@ var windows: seq[Window]
 
 proc nowMs(): int64 = getMonoTime().ticks div 1_000_000
 
-proc parallelFake(reply: string, delayMs = 30): BatchFn =
-  ## Answers every seat with the same body, holding each call open long enough
-  ## for the windows to be meaningful.
+const
+  GoodReplyAzure = """{"robots":[
+ {"id":"AZ-1","intent":"hold","target":[-17,0]},
+ {"id":"AZ-2","intent":"shoot"},
+ {"id":"AZ-3","intent":"intercept","target":[8,-4]}]}"""
+  GoodReplyCrimson = """{"robots":[
+ {"id":"CR-1","intent":"hold","target":[17,0]},
+ {"id":"CR-2","intent":"shoot"},
+ {"id":"CR-3","intent":"intercept","target":[-8,-4]}]}"""
+
+proc goodReplyFor(seat: int): string =
+  if (seat and 1) == 0: GoodReplyAzure else: GoodReplyCrimson
+
+proc parallelFake(delayMs = 30): BatchFn =
+  ## Answers every seat with its canonical directive, holding each call open
+  ## long enough for the windows to be meaningful.
   result = proc (calls: seq[BatchCall], deadline: MonoTime): seq[BatchReply]
       {.closure, gcsafe.} =
     {.cast(gcsafe).}:
@@ -32,7 +46,7 @@ proc parallelFake(reply: string, delayMs = 30): BatchFn =
       let ended = nowMs()
       for call in calls:
         windows.add Window(seat: call.seat, startMs: started, endMs: ended)
-        result.add BatchReply(seat: call.seat, ok: true, text: reply)
+        result.add BatchReply(seat: call.seat, ok: true, text: goodReplyFor(call.seat))
     discard deadline
 
 proc llmSeats(engine: TurnEngine) =
@@ -40,15 +54,10 @@ proc llmSeats(engine: TurnEngine) =
     engine.policies[seat] = SeatPolicy(kind: pkLlm,
       label: "test", connected: true)
 
-const GoodReply = """{"note":"hold the shape","robots":[
- {"id":"AZ-1","role":"keeper","intent":"hold","target":[-17,0],"say":"arc"},
- {"id":"AZ-2","role":"striker","intent":"shoot","target":[3,1],"say":"go"},
- {"id":"AZ-3","role":"wing","intent":"intercept","target":[8,-4],"say":"wide"}]}"""
-
 proc oneParallelBatch() =
   windows.setLen(0)
   var sim = playing(testConfig())
-  var engine = newTurnEngine(PromptSelection(), parallelFake(GoodReply))
+  var engine = newTurnEngine(PromptSelection(), parallelFake())
   engine.llmSeats()
   engine.turn(sim, 0, 0)
   doAssert windows.len == 2,
@@ -88,20 +97,25 @@ proc perTurnBudgetIsEnforced() =
   doAssert elapsed < 3000,
     "the turn ran " & $elapsed & " ms against a 300 ms budget"
   for seat in Seat:
-    doAssert sim.activeDirective[seat].source == dsFallback,
-      "a hung client did not fall back"
+    doAssert not sim.hasDirective[seat],
+      "a hung client must record a missed turn with no synthesized directive"
+    doAssert engine.decisions[seat].status == asRejected
+    doAssert engine.decisions[seat].executedAction.kind == JNull
     doAssert sim.stats[seat].fallbackTurns >= 1
+  let masks = sim.compileMasks(sim.activeDirective)
+  for i in 0 ..< RobotCount:
+    doAssert masks[i] == 0'u8, "missed turn must emit zero actuator masks"
   var timeouts = 0
   for record in engine.records:
     let node = parseJson(record)
     if node{"k"}.getStr() == "fallback" and node{"cause"}.getStr() == "timeout":
       inc timeouts
-  doAssert timeouts >= 2, "no timeout fallback records were written"
-  report "a hung client is bounded by the per-turn budget and falls back"
+  doAssert timeouts >= 2, "no timeout failure records were written"
+  report "a hung client is bounded by the per-turn budget and records a missed turn"
 
 proc exactlyOneRetry() =
-  ## A timeout on attempt 1 buys exactly ONE retry; a second failure is the
-  ## scripted fallback.
+  ## A timeout on attempt 1 buys exactly ONE retry; a second failure records
+  ## a missed turn with no synthesized directive.
   var sim = playing(testConfig())
   var attempts = 0
   var engine = newTurnEngine(PromptSelection(),
@@ -113,7 +127,7 @@ proc exactlyOneRetry() =
         if attempts == 1:
           result.add BatchReply(seat: call.seat, error: "Timeout was reached")
         else:
-          result.add BatchReply(seat: call.seat, ok: true, text: GoodReply))
+          result.add BatchReply(seat: call.seat, ok: true, text: goodReplyFor(call.seat)))
   engine.llmSeats()
   engine.turn(sim, 1, 0)
   doAssert attempts == 2, "expected exactly two batches, saw " & $attempts
@@ -130,19 +144,30 @@ proc exactlyOneRetry() =
   var sim2 = playing(testConfig())
   always.turn(sim2, 1, 0)
   for seat in Seat:
-    doAssert sim2.activeDirective[seat].source == dsFallback,
-      "two consecutive parse failures did not fall back"
-    for robot in sim2.activeDirective[seat].robots:
-      doAssert robot.intent == inHold and robot.kick == kickNever,
-        "scored LLM fallback must hold position with kickNever, not scripted formation"
+    doAssert not sim2.hasDirective[seat],
+      "two consecutive parse failures must record a missed turn, not a fallback directive"
+    doAssert always.decisions[seat].status == asRejected
+    doAssert always.decisions[seat].executedAction.kind == JNull
+    doAssert always.decisions[seat].selectedAttemptId.isNone
+    doAssert always.decisions[seat].attempts.len == 2
+    for attempt in always.decisions[seat].attempts:
+      doAssert not attempt.accepted
+      doAssert attempt.response == %"no json here", "submitted raw reply must be preserved"
+  let missedMasks = sim2.compileMasks(sim2.activeDirective)
+  for i in 0 ..< RobotCount:
+    doAssert missedMasks[i] == 0'u8, "missed turn must emit zero actuator masks"
   var causes = 0
+  var missedRecords = 0
   for record in always.records:
     let node = parseJson(record)
     if node{"k"}.getStr() == "fallback" and
         node{"cause"}.getStr() == "parse_error":
       inc causes
+    elif node{"k"}.getStr() == "missed_turn":
+      inc missedRecords
   doAssert causes == 4, "expected two attempts x two seats, saw " & $causes
-  report "one timeout buys exactly one retry; two failures fall back"
+  doAssert missedRecords == 2, "expected one missed_turn record per seat, saw " & $missedRecords
+  report "one timeout buys exactly one retry; two failures record a missed turn"
 
 proc transportErrorsAreLabelledByCause() =
   ## The cause label is read off the transport's error text, and curl words its
@@ -207,7 +232,7 @@ proc budgetGuardFires() =
       {.cast(gcsafe).}:
         inc calls
       for call in batch:
-        result.add BatchReply(seat: call.seat, ok: true, text: GoodReply))
+        result.add BatchReply(seat: call.seat, ok: true, text: goodReplyFor(call.seat)))
   engine.llmSeats()
   # 680 s elapsed against a 690 s budget and a 9 s turn: 680 + 18 > 690.
   engine.turn(sim, 30, 680)
@@ -221,14 +246,13 @@ proc budgetGuardFires() =
   engine.turn(sim, 31, 681)
   doAssert calls == 0, "the guard did not stick"
   for seat in Seat:
-    doAssert sim.activeDirective[seat].source == dsFallback
+    doAssert not sim.hasDirective[seat]
+    doAssert engine.decisions[seat].status == asMissing
   report "the budget guard fires once, sticks, and costs no network wait"
 
 proc budgetGuardStillEndsFullTime() =
-  ## The whole point of the guard: the match finishes on the scripted layer and
-  ## ends `complete/full_time` instead of running into the wall clock and
-  ## ending `deadline`. The guard test above stops at "it fired"; this one
-  ## plays the episode out.
+  ## The match finishes cleanly after budget guard with missed turns (no
+  ## synthesized directives) and reaches complete/full_time.
   var sim = playing(testConfig(maxTicks = 600))
   var calls = 0
   var engine = newTurnEngine(PromptSelection(),
@@ -237,7 +261,7 @@ proc budgetGuardStillEndsFullTime() =
       {.cast(gcsafe).}:
         inc calls
       for call in batch:
-        result.add BatchReply(seat: call.seat, ok: true, text: GoodReply))
+        result.add BatchReply(seat: call.seat, ok: true, text: goodReplyFor(call.seat)))
   engine.llmSeats()
   var prev = newSeq[InputState](RobotCount)
   var guard = 0
@@ -247,8 +271,7 @@ proc budgetGuardStillEndsFullTime() =
     inc guard
     if sim.phase == Playing:
       let elapsed = sim.tickCount - sim.gameStartTick
-      if elapsed mod sim.turnTicks() == 0 or
-          not (sim.hasDirective[Azure] and sim.hasDirective[Crimson]):
+      if elapsed mod sim.turnTicks() == 0 or engine.turnsIssued == 0:
         engine.turn(sim, elapsed div sim.turnTicks(), 680)
         inc turns
     let masks = sim.compileMasks(sim.activeDirective)
@@ -269,12 +292,12 @@ proc budgetGuardStillEndsFullTime() =
       ", not full_time"
   for seat in Seat:
     doAssert sim.stats[seat].fallbackTurns == int32(turns),
-      "the guarded seat did not play the scripted layer every turn"
+      "the guarded seat did not record missed turns every turn"
     doAssert sim.stats[seat].llmTurns == 0
-  report "a guarded match finishes on the scripted layer, complete/full_time"
+  report "a guarded match finishes with missed turns, complete/full_time"
 
 proc missingPlayerFallsBackInstantly() =
-  ## With no player transport every turn falls back without a network wait.
+  ## With no player transport every turn settles as a missed turn without wait.
   var sim = playing(testConfig())
   var engine = newTurnEngine(PromptSelection(), nil)
   engine.llmSeats()
@@ -286,6 +309,7 @@ proc missingPlayerFallsBackInstantly() =
     "40 credential-free turns took " & $elapsed & " ms"
   for seat in Seat:
     doAssert sim.stats[seat].fallbackTurns == 40
+    doAssert not sim.hasDirective[seat]
   report "40 missing-player turns settle in " & $elapsed & " ms"
 
 proc playerFallbackCauseIsPreserved() =
@@ -300,7 +324,8 @@ proc playerFallbackCauseIsPreserved() =
     engine.llmSeats()
     engine.turn(sim, 4, 0)
     for seat in Seat:
-      doAssert sim.activeDirective[seat].source == dsFallback
+      doAssert not sim.hasDirective[seat]
+      doAssert engine.decisions[seat].status == asRejected
     for record in engine.records:
       let node = parseJson(record)
       if node{"k"}.getStr() == "fallback":
@@ -311,7 +336,7 @@ proc playerFallbackCauseIsPreserved() =
     doAssert reported.len == 4
     for seen in reported:
       doAssert seen == cause
-  report "the player's fallback cause reaches the game-owned replay"
+  report "the player's failure cause reaches the game-owned replay"
 
 proc scriptedSeatsNeverCallOut() =
   var sim = playing(testConfig())
@@ -322,7 +347,7 @@ proc scriptedSeatsNeverCallOut() =
       {.cast(gcsafe).}:
         inc calls
       for call in batch:
-        result.add BatchReply(seat: call.seat, ok: true, text: GoodReply))
+        result.add BatchReply(seat: call.seat, ok: true, text: goodReplyFor(call.seat)))
   engine.policies[Azure] = SeatPolicy(kind: pkScripted, baseline: "formation")
   engine.policies[Crimson] = SeatPolicy(kind: pkLlm)
   engine.turn(sim, 0, 0)
@@ -561,28 +586,84 @@ proc seatsAlwaysScoreToOne() =
   report "the two seats' scores always sum to exactly 1.000"
 
 proc disconnectKeepsPlaying() =
-  ## A seat that drops mid-match keeps playing on the scripted layer, and
-  ## revives on reconnect. No failure mode leaves a robot unactuated.
+  ## A seat that drops mid-match misses turns with zero actuator masks (no
+  ## implicit scripted fallback) and resumes when it replies again.
   var sim = playing(testConfig())
-  var engine = newTurnEngine(PromptSelection(), parallelFake(GoodReply))
+  var disconnected = false
+  var engine = newTurnEngine(PromptSelection(),
+    proc (calls: seq[BatchCall], deadline: MonoTime): seq[BatchReply]
+        {.closure, gcsafe.} =
+      for call in calls:
+        {.cast(gcsafe).}:
+          if disconnected and call.seat == ord(Crimson):
+            result.add BatchReply(seat: call.seat, error: "player disconnected")
+          else:
+            result.add BatchReply(seat: call.seat, ok: true, text: goodReplyFor(call.seat)))
   engine.llmSeats()
   engine.turn(sim, 0, 0)
   doAssert sim.activeDirective[Crimson].source == dsLlm
   sim.removePlayerAt(1)
-  engine.policies[Crimson] = SeatPolicy(kind: pkScripted, baseline: "formation")
+  disconnected = true
   engine.turn(sim, 1, 0)
-  doAssert sim.activeDirective[Crimson].source == dsScripted
+  doAssert not sim.hasDirective[Crimson], "disconnected seat must not synthesize a fallback directive"
   let masks = sim.compileMasks(sim.activeDirective)
-  var actuated = 0
-  for i in 0 ..< RobotCount:
-    if masks[i] != 0:
-      inc actuated
-  doAssert actuated > 0, "the dropped seat's trio went inert"
-  engine.policies[Crimson] = SeatPolicy(kind: pkLlm)
+  for slot in 0 ..< RobotsPerSeat:
+    doAssert masks[firstRobotOf(Crimson) + slot] == 0'u8,
+      "disconnected seat must emit zero actuator masks"
+  disconnected = false
   engine.turn(sim, 2, 0)
-  doAssert sim.activeDirective[Crimson].source == dsLlm,
+  doAssert sim.hasDirective[Crimson] and sim.activeDirective[Crimson].source == dsLlm,
     "the seat did not revive on reconnect"
-  report "a dropped seat keeps playing and revives on reconnect"
+  report "a dropped seat records missed turns with zero masks and revives on reconnect"
+
+proc outageClassification() =
+  ## All-game provider/transport outage on an LLM seat is flagged as a failed
+  ## evaluation, whereas all-game parse_error or partial-turn outage is not.
+  var sim1 = playing(testConfig())
+  var engine1 = newTurnEngine(PromptSelection(),
+    proc (calls: seq[BatchCall], deadline: MonoTime): seq[BatchReply]
+        {.closure, gcsafe.} =
+      for call in calls:
+        result.add BatchReply(seat: call.seat, error: "503", cause: "transport_error"))
+  engine1.policies[Azure] = SeatPolicy(kind: pkLlm, label: "learner", connected: true)
+  engine1.policies[Crimson] = SeatPolicy(kind: pkScripted, baseline: "formation", label: "formation", connected: true)
+  engine1.turn(sim1, 0, 0)
+  engine1.turn(sim1, 1, 0)
+  doAssert engine1.hasAllGameLearnerOutage(sim1),
+    "all-game transport outage was not flagged"
+
+  var sim2 = playing(testConfig())
+  var engine2 = newTurnEngine(PromptSelection(),
+    proc (calls: seq[BatchCall], deadline: MonoTime): seq[BatchReply]
+        {.closure, gcsafe.} =
+      for call in calls:
+        result.add BatchReply(seat: call.seat, ok: true, text: "not json"))
+  engine2.policies[Azure] = SeatPolicy(kind: pkLlm, label: "learner", connected: true)
+  engine2.policies[Crimson] = SeatPolicy(kind: pkScripted, baseline: "formation", label: "formation", connected: true)
+  engine2.turn(sim2, 0, 0)
+  engine2.turn(sim2, 1, 0)
+  doAssert not engine2.hasAllGameLearnerOutage(sim2),
+    "parse_error should not be classified as provider/transport outage"
+
+  var sim3 = playing(testConfig())
+  var turnNo = 0
+  var engine3 = newTurnEngine(PromptSelection(),
+    proc (calls: seq[BatchCall], deadline: MonoTime): seq[BatchReply]
+        {.closure, gcsafe.} =
+      {.cast(gcsafe).}:
+        inc turnNo
+        for call in calls:
+          if turnNo <= 2:
+            result.add BatchReply(seat: call.seat, error: "Timeout was reached", cause: "timeout")
+          else:
+            result.add BatchReply(seat: call.seat, ok: true, text: goodReplyFor(call.seat)))
+  engine3.policies[Azure] = SeatPolicy(kind: pkLlm, label: "learner", connected: true)
+  engine3.policies[Crimson] = SeatPolicy(kind: pkScripted, baseline: "formation", label: "formation", connected: true)
+  engine3.turn(sim3, 0, 0)
+  engine3.turn(sim3, 1, 0)
+  doAssert not engine3.hasAllGameLearnerOutage(sim3),
+    "partial-turn outage with accepted turns should still complete normally"
+  report "all-game learner transport outage is separated from parse_error and partial missed turns"
 
 when isMainModule:
   echo "test_engine"
@@ -602,4 +683,5 @@ when isMainModule:
   physicsGuardTripsAndLeavesAPartialReplay()
   seatsAlwaysScoreToOne()
   disconnectKeepsPlaying()
+  outageClassification()
   echo "test_engine: all good"

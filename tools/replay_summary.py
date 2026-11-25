@@ -187,6 +187,7 @@ def parse(raw):
             raise ValueError("unknown replay record type 0x%02x" % kind)
 
     directives = []
+    missed_turns = 0
     fallback_attempts = 0
     guards = []
     results = None
@@ -211,6 +212,8 @@ def parse(raw):
                 "intents": [r.get("intent") for r in record.get("robots", [])],
                 "says": [r.get("say") for r in record.get("robots", [])],
             })
+        elif key == "missed_turn":
+            missed_turns += 1
         elif key == "fallback":
             # One record per FAILED ATTEMPT, so attempt 1 leaves a record even
             # when the retry succeeds. See `fallbacks` below.
@@ -225,13 +228,8 @@ def parse(raw):
         elif key == "result":
             results = record.get("results")
 
-    # `fallbacks` is the number of TURNS that actually played the scripted
-    # fallback, which is what the phase-60 check means by it: a `fallback`
-    # record is written per failed ATTEMPT, so attempt 1 leaves one behind even
-    # when the retry lands and the turn ends up sourced "llm". Counting records
-    # would report more fallen-back turns than there were. The raw record count
-    # stays available as `fallbackAttempts` for forensics.
-    fallbacks = sum(1 for d in directives if d.get("source") == "fallback")
+    # `fallbacks` counts missed turns (plus any legacy fallback-sourced directives).
+    fallbacks = missed_turns + sum(1 for d in directives if d.get("source") == "fallback")
 
     names = [entry.get("name", "") for entry in config.get("players", [])]
     if joins:

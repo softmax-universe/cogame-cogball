@@ -65,9 +65,11 @@ docker run --rm -e COWORLD_PLAYER_WS_URL="$COWORLD_PLAYER_WS_URL" \
 ```
 
 `formation` is the reference baseline (one keeper on the arc, the nearest robot
-on the ball, the third in the channel) and also the fallback whenever a coaching
-reply fails twice. `swarm` is the second filler — everyone chases — deliberately
-weaker, so the ladder has a spread.
+on the ball, the third in the channel) when explicitly selected via
+`PLAYER_SCRIPTED=formation`. `swarm` is the second explicit baseline — everyone
+chases — deliberately weaker, so the ladder has a spread. Failed coaching turns
+are recorded as missed turns with zero actuator input rather than substituting
+a scripted fallback.
 
 ## Watching
 

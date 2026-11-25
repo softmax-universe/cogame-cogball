@@ -1,5 +1,5 @@
 ## Directives: the coaching object a seat plays for one 120-tick turn, its
-## tolerant parser/repairer, and the view-coordinate transform every policy
+## strict canonical parser, and the view-coordinate transform every policy
 ## sees the world through.
 ##
 ## Two hard rules live here and are pinned by tests/test_directives.nim:
@@ -7,14 +7,15 @@
 ## 1. **Every recorded string is truncated on RUNE boundaries, never bytes.**
 ##    A byte-truncated multi-byte character is exactly the bug that makes
 ##    replay bytes render in a browser but fail a strict parser.
-## 2. **Parsing is tolerant and never fails hard.** Markdown fences, prose
-##    prefixes, an id-keyed `robots` object, numeric strings, unknown enums,
-##    out-of-pitch targets, four robots, zero robots — all repair. Only when no
-##    object with at least one usable robot entry can be recovered do the retry
-##    and then the scripted fallback fire.
+## 2. **Parsing is strict and never synthesizes fallback orders.** Replies must
+##    provide the canonical JSON shape with exact robot IDs for all three of the
+##    seat's robots, valid intents, a `[x, y]` target when `intent` is `"hold"`,
+##    and a valid teammate `pass_to` when `intent` is `"pass"`. Optional fields
+##    (`kick`, `role`, non-hold `target`, `note`, `say`) use fixed documented
+##    defaults when omitted, and supplied invalid values are rejected explicitly.
 
 import
-  std/[json, math, strutils, unicode],
+  std/[json, math, unicode],
   sim
 
 # --------------------------------------------------------------------------
@@ -68,53 +69,45 @@ proc clipRunes*(text: string, maxRunes: int): string =
 # --------------------------------------------------------------------------
 
 proc robotIndexOfId*(id: string): int =
-  ## `AZ-1`..`AZ-3` / `CR-1`..`CR-3`, case-insensitive, separator-tolerant.
-  ## -1 when the token names no robot.
-  let text = clipRunes(id, MaxRobotIdRunes).toUpperAscii()
-  var digits = ""
-  var prefix = ""
-  for ch in text:
-    if ch in {'A' .. 'Z'}:
-      if prefix.len < 2: prefix.add(ch)
-    elif ch in {'0' .. '9'}:
-      digits.add(ch)
-  if digits.len == 0:
-    return -1
-  var slot: int
-  try:
-    slot = parseInt(digits)
-  except ValueError:
-    return -1
-  if slot < 1 or slot > RobotsPerSeat:
-    return -1
-  case prefix
-  of "AZ": firstRobotOf(Azure) + slot - 1
-  of "CR": firstRobotOf(Crimson) + slot - 1
+  ## Exact canonical robot ID: `AZ-1`..`AZ-3` or `CR-1`..`CR-3`.
+  ## Returns -1 for any other string.
+  case id
+  of "AZ-1": 0
+  of "AZ-2": 1
+  of "AZ-3": 2
+  of "CR-1": 3
+  of "CR-2": 4
+  of "CR-3": 5
   else: -1
 
 # --------------------------------------------------------------------------
-# Enum repair
+# Strict enum parsing
 # --------------------------------------------------------------------------
 
-proc roleOfText*(text: string): Role =
-  case text.strip().toLowerAscii()
-  of "keeper": roleKeeper
-  of "back": roleBack
-  of "striker": roleStriker
-  else: roleWing        ## the documented repair for an unknown role.
+proc parseRole(text: string, role: var Role): bool =
+  case text
+  of "keeper": role = roleKeeper; true
+  of "back": role = roleBack; true
+  of "wing": role = roleWing; true
+  of "striker": role = roleStriker; true
+  else: false
 
-proc intentOfText*(text: string): Intent =
-  case text.strip().toLowerAscii()
-  of "intercept": inIntercept
-  of "hold": inHold
-  of "shoot": inShoot
-  of "pass": inPass
-  of "clear": inClear
-  of "press": inPress
-  else: inChase         ## the documented repair for an unknown intent.
+proc parseIntent(text: string, intent: var Intent): bool =
+  case text
+  of "chase": intent = inChase; true
+  of "intercept": intent = inIntercept; true
+  of "hold": intent = inHold; true
+  of "shoot": intent = inShoot; true
+  of "pass": intent = inPass; true
+  of "clear": intent = inClear; true
+  of "press": intent = inPress; true
+  else: false
 
-proc kickOfText*(text: string): KickMode =
-  if text.strip().toLowerAscii() == "never": kickNever else: kickAuto
+proc parseKick(text: string, kick: var KickMode): bool =
+  case text
+  of "auto": kick = kickAuto; true
+  of "never": kick = kickNever; true
+  else: false
 
 # --------------------------------------------------------------------------
 # Directive construction and serialization
@@ -129,39 +122,59 @@ proc emptyDirective*(seat: Seat): Directive =
       passTo: -1, kick: kickAuto, say: "")
   discard seat
 
+proc robotOrderJson(
+  seat: Seat,
+  slot: int,
+  order: RobotOrder,
+  rounded: bool
+): JsonNode =
+  result = %*{
+    "id": robotId(firstRobotOf(seat) + slot),
+    "intent": intentText(order.intent)
+  }
+  if order.targetX != NoTarget and order.targetY != NoTarget:
+    result["target"] =
+      if rounded: %*[round2(viewX(order.targetX)), round2(viewY(order.targetY))]
+      else: %*[viewX(order.targetX), viewY(order.targetY)]
+  if order.intent == inPass and order.passTo >= 0:
+    result["pass_to"] = %robotId(int(order.passTo))
+  if order.kick != kickAuto:
+    result["kick"] = %kickText(order.kick)
+  if order.role != roleWing:
+    result["role"] = %roleText(order.role)
+  if order.say.len > 0:
+    result["say"] = %order.say
+
 proc directiveJson*(sim: SimServer, seat: Seat, directive: Directive): JsonNode =
   ## The `directive` replay chat record. Capped at MaxDirectiveRecordRunes by
-  ## the caller (`recordRunes` below).
+  ## the caller (`recordRunes` below). Omits unused optionals rather than
+  ## emitting null placeholders.
+  discard sim
   var robots = newJArray()
   for slot in 0 ..< RobotsPerSeat:
-    let order = directive.robots[slot]
-    robots.add(%*{
-      "id": robotId(firstRobotOf(seat) + slot),
-      "role": roleText(order.role),
-      "intent": intentText(order.intent),
-      "target": [round2(viewX(order.targetX)), round2(viewY(order.targetY))],
-      "pass_to": (if order.passTo >= 0: %robotId(int(order.passTo)) else: newJNull()),
-      "kick": kickText(order.kick),
-      "say": order.say
-    })
-  %*{
+    robots.add(robotOrderJson(seat, slot, directive.robots[slot], rounded = true))
+  result = %*{
     "k": "directive",
     "turn": directive.turn,
     "seat": ord(seat),
     "alias": seatAlias(seat),
     "source": sourceText(directive.source),
     "latency_ms": directive.latencyMs,
-    "note": directive.note,
     "robots": robots
   }
+  if directive.note.len > 0:
+    result["note"] = %directive.note
 
 proc actionJson*(sim: SimServer, seat: Seat, directive: Directive): JsonNode =
   ## Exact installed control directive; spectator records round positions for display.
-  let record = sim.directiveJson(seat, directive)
-  result = %*{"note": record["note"], "robots": record["robots"]}
+  ## Omits unused optionals rather than emitting null placeholders.
+  discard sim
+  var robots = newJArray()
   for slot in 0 ..< RobotsPerSeat:
-    result["robots"][slot]["target"] = %*[viewX(directive.robots[slot].targetX),
-      viewY(directive.robots[slot].targetY)]
+    robots.add(robotOrderJson(seat, slot, directive.robots[slot], rounded = false))
+  result = %*{"robots": robots}
+  if directive.note.len > 0:
+    result["note"] = %directive.note
 
 proc clipJsonStrings(node: JsonNode, budget: int): JsonNode =
   ## A copy of `node` with every STRING VALUE clipped to `budget` runes. Keys
@@ -217,12 +230,12 @@ proc capRecord*(text: string): string =
   clipRunes(text, MaxDirectiveRecordRunes)
 
 # --------------------------------------------------------------------------
-# The tolerant parser
+# The strict canonical parser
 # --------------------------------------------------------------------------
 
-proc numberOf(node: JsonNode, ok: var bool): float =
-  ## Accepts a JSON number OR a numeric string; anything else, or a
-  ## non-finite value, reports `ok = false`.
+proc finiteNumberOf(node: JsonNode, ok: var bool): float =
+  ## Accepts a finite JSON number only (int or float); rejects strings and
+  ## non-finite values.
   ok = false
   if node.isNil:
     return 0.0
@@ -236,111 +249,105 @@ proc numberOf(node: JsonNode, ok: var bool): float =
       return 0.0
     ok = true
     return value
-  of JString:
-    try:
-      let value = parseFloat(node.getStr().strip())
-      if value != value or value == Inf or value == NegInf:
-        return 0.0
-      ok = true
-      return value
-    except ValueError:
-      return 0.0
   else:
     return 0.0
 
-proc entriesOf(node: JsonNode): seq[tuple[id: string, body: JsonNode]] =
-  ## `robots` may arrive as an array of objects or as an object keyed by robot
-  ## id. Both shapes reduce to (id, body) pairs; the id inside the body wins.
-  if node.isNil:
-    return
-  case node.kind
-  of JArray:
-    for entry in node:
-      if entry.kind == JObject:
-        result.add((entry{"id"}.getStr(), entry))
-  of JObject:
-    for key, entry in node:
-      if entry.kind == JObject:
-        let inner = entry{"id"}.getStr()
-        let useId = if inner.len > 0: inner else: key
-        result.add((useId, entry))
-  else:
-    discard
+proc rejectDirective(reason: string): tuple[directive: Directive, usable: bool, reason: string] =
+  (Directive(), false, reason)
 
 proc parseDirective*(
   sim: SimServer,
   seat: Seat,
   payload: JsonNode,
-  previous: Directive,
-  hasPrevious: bool,
-  fallback: Directive,
   turn: int
-): tuple[directive: Directive, usable: bool] =
-  ## Repairs one reply into a legal directive. `usable` is false when no robot
-  ## entry could be recovered at all — the only case that triggers the retry.
-  var directive = fallback
-  directive.turn = int32(turn)
-  directive.source = dsLlm
-  directive.note = clipRunes(payload{"note"}.getStr(), MaxNoteRunes)
+): tuple[directive: Directive, usable: bool, reason: string] =
+  ## Strictly validates one JSON directive payload for `seat`. Never synthesizes
+  ## missing robots, unknown enums, bad targets, or fallback orders.
+  discard sim
+  if payload.isNil or payload.kind != JObject:
+    return rejectDirective("directive must be a JSON object")
+  var directive = Directive(turn: int32(turn), source: dsLlm)
+  if payload.hasKey("note"):
+    if payload["note"].kind != JString:
+      return rejectDirective("note must be a string")
+    directive.note = clipRunes(payload["note"].getStr(), MaxNoteRunes)
+
+  if not payload.hasKey("robots") or payload["robots"].kind != JArray:
+    return rejectDirective("robots must be an array of 3 robot orders")
+  let robotsNode = payload["robots"]
+  if robotsNode.len != RobotsPerSeat:
+    return rejectDirective("robots must contain exactly 3 entries, got " & $robotsNode.len)
 
   let base = firstRobotOf(seat)
   var filled: array[RobotsPerSeat, bool]
-  var entries = entriesOf(payload{"robots"})
-  var positional = 0
-  for entry in entries:
-    var index = robotIndexOfId(entry.id)
+  for entry in robotsNode:
+    if entry.kind != JObject:
+      return rejectDirective("each robot entry must be a JSON object")
+    if not entry.hasKey("id") or entry["id"].kind != JString:
+      return rejectDirective("robot entry requires a string id")
+    let rawId = entry["id"].getStr()
+    let index = robotIndexOfId(rawId)
     if index < 0 or seatOfRobot(index) != seat:
-      # An unmatched (or other-team) id is assigned to this seat's robots by
-      # position, in reply order.
-      while positional < RobotsPerSeat and filled[positional]:
-        inc positional
-      if positional >= RobotsPerSeat:
-        continue                      ## extra entries are dropped.
-      index = base + positional
+      return rejectDirective("invalid robot id for " & seatAlias(seat) & ": " & rawId)
     let slot = index - base
-    if slot < 0 or slot >= RobotsPerSeat or filled[slot]:
-      continue
+    if filled[slot]:
+      return rejectDirective("duplicate robot id: " & rawId)
     filled[slot] = true
-    var order = RobotOrder()
-    order.role = roleOfText(entry.body{"role"}.getStr())
-    order.intent = intentOfText(entry.body{"intent"}.getStr())
-    order.kick = kickOfText(entry.body{"kick"}.getStr("auto"))
-    order.say = clipRunes(entry.body{"say"}.getStr(), MaxSayRunes)
-    # target: two finite numbers, clamped into the pitch; anything else falls
-    # back to the robot's CURRENT position.
-    var okX = false
-    var okY = false
-    var vx = 0.0
-    var vy = 0.0
-    let target = entry.body{"target"}
-    if not target.isNil and target.kind == JArray and target.len >= 2:
-      vx = numberOf(target[0], okX)
-      vy = numberOf(target[1], okY)
-    elif not target.isNil and target.kind == JObject:
-      vx = numberOf(target{"x"}, okX)
-      vy = numberOf(target{"y"}, okY)
-    if okX and okY:
+
+    var order = RobotOrder(
+      role: roleWing,
+      targetX: NoTarget,
+      targetY: NoTarget,
+      passTo: -1'i32,
+      kick: kickAuto
+    )
+    if not entry.hasKey("intent") or entry["intent"].kind != JString or
+        not parseIntent(entry["intent"].getStr(), order.intent):
+      return rejectDirective("invalid intent for " & rawId)
+    if entry.hasKey("role"):
+      if entry["role"].kind != JString or
+          not parseRole(entry["role"].getStr(), order.role):
+        return rejectDirective("invalid role for " & rawId)
+    if entry.hasKey("kick"):
+      if entry["kick"].kind != JString or
+          not parseKick(entry["kick"].getStr(), order.kick):
+        return rejectDirective("invalid kick for " & rawId)
+
+    if entry.hasKey("target"):
+      if entry["target"].kind != JArray or entry["target"].len != 2:
+        return rejectDirective("target for " & rawId & " must be a [x, y] array")
+      var okX = false
+      var okY = false
+      let vx = finiteNumberOf(entry["target"][0], okX)
+      let vy = finiteNumberOf(entry["target"][1], okY)
+      if not okX or not okY:
+        return rejectDirective("target coordinates for " & rawId & " must be finite numbers")
+      if vx < -ViewHalfW or vx > ViewHalfW or vy < -ViewHalfH or vy > ViewHalfH:
+        return rejectDirective("target coordinates for " & rawId & " out of pitch bounds")
       order.targetX = worldXOfView(vx)
       order.targetY = worldYOfView(vy)
-    else:
-      order.targetX = worldXOfView(round2(viewX(sim.robots[index].x)))
-      order.targetY = worldYOfView(round2(viewY(sim.robots[index].y)))
-    # pass_to: a TEAMMATE id that is not this robot; anything else is null.
-    order.passTo = -1
-    let passNode = entry.body{"pass_to"}
-    if not passNode.isNil and passNode.kind == JString:
-      let mate = robotIndexOfId(passNode.getStr())
-      if mate >= 0 and mate != index and seatOfRobot(mate) == seat:
-        order.passTo = int32(mate)
+    elif order.intent == inHold:
+      return rejectDirective("hold intent for " & rawId & " requires a [x, y] target")
+
+    if entry.hasKey("pass_to") and entry["pass_to"].kind != JNull:
+      if entry["pass_to"].kind != JString:
+        return rejectDirective("pass_to for " & rawId & " must be a teammate id")
+      let passId = entry["pass_to"].getStr()
+      let mate = robotIndexOfId(passId)
+      if mate < 0 or mate == index or seatOfRobot(mate) != seat:
+        return rejectDirective("invalid pass_to for " & rawId & ": " & passId)
+      order.passTo = int32(mate)
+    if order.intent == inPass and order.passTo < 0:
+      return rejectDirective("pass intent for " & rawId & " requires a valid teammate pass_to")
+
+    if entry.hasKey("say"):
+      if entry["say"].kind != JString:
+        return rejectDirective("say for " & rawId & " must be a string")
+      order.say = clipRunes(entry["say"].getStr(), MaxSayRunes)
+
     directive.robots[slot] = order
 
-  var usable = false
   for slot in 0 ..< RobotsPerSeat:
-    if filled[slot]:
-      usable = true
-    else:
-      # A missing robot keeps last turn's order for that robot, else the
-      # scripted fallback's.
-      directive.robots[slot] =
-        if hasPrevious: previous.robots[slot] else: fallback.robots[slot]
-  (directive, usable)
+    if not filled[slot]:
+      return rejectDirective("missing robot order for " & robotId(base + slot))
+  (directive, true, "")

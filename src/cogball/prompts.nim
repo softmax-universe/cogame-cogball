@@ -113,22 +113,27 @@ from burying the ball on the boards.
 """
 ]
 
-const ActionRules = """Reply with a single JSON object and NOTHING else. Your reply MUST begin with '{'.
-Schema:
-{"note":"<=160 chars","robots":[
-  {"id":"<one of your three robot ids>",
-   "role":"keeper|back|wing|striker",
-   "intent":"chase|intercept|hold|shoot|pass|clear|press",
-   "target":[x,y],            // metres, x in [-20,20], y in [-12.5,12.5]
-   "pass_to":"<teammate id or null>",
-   "kick":"auto|never",
-   "say":"<=48 chars"} , ... exactly three, one per robot ]}
+const ActionRules = """Reply with a single JSON object (optionally wrapped in a ```json code fence) and NOTHING else.
+Fields:
+- robots: array of exactly 3 objects, one for each of your three robot ids from your_robots (AZ-1, AZ-2, AZ-3 for Azure; CR-1, CR-2, CR-3 for Crimson):
+  - id: exact robot id string (required)
+  - intent: "chase" | "intercept" | "hold" | "shoot" | "pass" | "clear" | "press" (required)
+  - target: [x, y] numbers in metres, x in [-20, 20], y in [-12.5, 12.5] (required for "hold"; optional 20% steering bias for other intents)
+  - pass_to: teammate robot id string (required when intent is "pass"; omit otherwise)
+  - kick: optional "auto" | "never" (default "auto")
+  - role: optional label "keeper" | "back" | "wing" | "striker" (default "wing")
+  - say: optional string (<=48 chars)
+- note: optional string (<=160 chars)
 Intents: chase = drive at the ball; intercept = drive to where the ball will be;
 hold = hold the target point and face the ball; shoot = line up behind the ball and
 strike it at their goal; pass = same but aimed at pass_to; clear = hammer it away
-from your own goal; press = shadow the nearest opponent. target is used directly by
-hold and as a bias by the others. kick:"never" makes the robot shepherd the ball
-instead of striking it."""
+from your own goal; press = shadow the nearest opponent. kick:"never" makes the robot
+shepherd the ball instead of striking it.
+Example (use your own team's robot ids from your_robots):
+{"robots":[
+  {"id":"AZ-1","intent":"hold","target":[-18.0,0.0]},
+  {"id":"AZ-2","intent":"shoot"},
+  {"id":"AZ-3","intent":"pass","pass_to":"AZ-2"}]}"""
 
 proc systemPrompt*(selection: PromptSelection): string =
   Introductions[ord(selection.selectedVariant)] & ActionRules

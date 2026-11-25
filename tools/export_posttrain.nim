@@ -69,8 +69,7 @@ when isMainModule:
       lastGoals: array[Seat, int32]
     while game.phase != GameOver:
       let elapsed = game.tickCount - game.gameStartTick
-      if elapsed mod game.turnTicks() == 0 or
-          not (game.hasDirective[Azure] and game.hasDirective[Crimson]):
+      if elapsed mod game.turnTicks() == 0 or decisions == 0:
         let turn = elapsed div game.turnTicks()
         engine.turn(game, turn, 0)
         capture.beginTurn(engine, game)

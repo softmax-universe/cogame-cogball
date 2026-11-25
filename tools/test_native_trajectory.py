@@ -42,10 +42,8 @@ for flow in (
                 "robots": [
                     {
                         "id": robot["id"],
-                        "role": "wing",
                         "intent": "hold",
                         "target": robot["pos"],
-                        "pass_to": None,
                         "kick": "never",
                         "say": "public robot speech",
                     }
@@ -199,10 +197,23 @@ for flow in (
                 for line in (output / "trajectory.jsonl").read_text().splitlines()
             ]
             decisions, episode = events[:-1], events[-1]
-            assert (
-                episode["status"] == "completed"
-                and episode["outcome"]["reason"] == "complete"
-            )
+            outage_flow = flow in {"provider-error", "malformed-200", "timeout"}
+            if outage_flow:
+                assert (
+                    episode["status"] == "failed"
+                    and episode["outcome"]["reason"] == "fault"
+                    and episode["outcome"]["endRule"] == "host_error"
+                    and episode.get("participants") is None
+                )
+                assert not (output / "results.json").exists()
+                assert not (output / "replay.bitreplay").exists()
+            else:
+                assert (
+                    episode["status"] == "completed"
+                    and episode["outcome"]["reason"] == "complete"
+                )
+                assert (output / "results.json").exists()
+                assert (output / "replay.bitreplay").exists()
             assert len(decisions) == 4
             assert (output / "trajectory.jsonl").stat().st_mode & 0o777 == 0o600
             seen = set()
@@ -293,9 +304,12 @@ for flow in (
                 else:
                     assert decision["selected_attempt_id"] is None
             assert seen == set(calls)
-            public = (output / "replay.bitreplay").read_bytes().decode(
-                "latin1"
-            ) + "".join(
+            replay_text = (
+                (output / "replay.bitreplay").read_bytes().decode("latin1")
+                if (output / "replay.bitreplay").exists()
+                else ""
+            )
+            public = replay_text + "".join(
                 (output / p).read_text()
                 for p in ["game.log", *(f"player{i}.log" for i in range(2))]
             )
@@ -307,10 +321,22 @@ for flow in (
             ):
                 assert secret not in public
             if flow in {"invalid", "provider-error", "malformed-200", "timeout"}:
-                assert any(
-                    d["action_status"] == "fallback" and len(d["attempts"]) == 2
+                rejected = [
+                    d
                     for d in decisions
-                )
+                    if d["action_status"] == "rejected" and len(d["attempts"]) == 2
+                ]
+                assert rejected, f"{flow}: expected rejected decisions with 2 attempts"
+                for d in rejected:
+                    assert d["executed_action"] is None
+                    assert d["selected_attempt_id"] is None
+                    assert d["fallback_origin"] is None
+                    masks = base64.b64decode(
+                        d["observation"]["execution"]["seat_input_masks_b64"]
+                    )
+                    assert all(b == 0 for b in masks), (
+                        f"{flow}: missed turn must emit zero actuator masks"
+                    )
             archive = output / "fixture_calls.json"
             archive.write_text(
                 json.dumps(

@@ -60,6 +60,8 @@ type
     lastGoals*: seq[JsonNode]
     llmOff*: bool
     guardTurn*: int
+    turnsIssued*: int
+    outageTurns*: array[Seat, int]
     decisions*: array[Seat, TurnDecision]
     records*: seq[string]      ## the replay chat records this turn produced.
 
@@ -205,28 +207,6 @@ proc noteGoal*(engine: TurnEngine, tick: int, robot: int, seat: Seat) =
   while engine.lastGoals.len > 4:
     engine.lastGoals.delete(0)
 
-proc fallbackFor(
-  engine: TurnEngine,
-  sim: SimServer,
-  seat: Seat,
-  turn: int
-): Directive =
-  ## Neutral hold fallback for scored LLM failures: every robot holds its
-  ## current position with `kickNever` instead of running `formationDirective`.
-  result = Directive(turn: int32(turn), source: dsFallback)
-  let base = firstRobotOf(seat)
-  for slot in 0 ..< RobotsPerSeat:
-    let robot = sim.robots[base + slot]
-    result.robots[slot] = RobotOrder(
-      role: roleBack,
-      intent: inHold,
-      targetX: robot.x,
-      targetY: robot.y,
-      passTo: -1'i32,
-      kick: kickNever,
-      say: ""
-    )
-
 proc turn*(
   engine: TurnEngine,
   sim: var SimServer,
@@ -235,20 +215,21 @@ proc turn*(
 ) =
   ## Runs one decision turn: at most one parallel batch plus at most one
   ## parallel retry, all inside a monotonic `turnBudgetMs` bound, then installs
-  ## both seats' directives and writes the records.
+  ## accepted directives or records a missed turn with no synthesized action.
+  inc engine.turnsIssued
   engine.records.setLen(0)
   for seat in Seat:
     engine.decisions[seat] = TurnDecision(
       observation: engine.seatViewJson(sim, seat, turnIndex),
-      status: asFallback, executedAction: newJNull())
+      status: asMissing, executedAction: newJNull())
   let
     deadline = getMonoTime() + initDuration(
       milliseconds = max(1, sim.config.turnBudgetMs))
     budget = sim.config.wallClockBudgetSeconds
     perTurn = (sim.config.turnBudgetMs + 999) div 1000
 
-  # Budget guard: switch the LLM off for the rest of the match rather than let
-  # the episode end `deadline`. Microseconds per turn from here on.
+  # Budget guard: stop issuing LLM calls near the wall-clock limit so the
+  # episode can still finish cleanly; remaining LLM turns are recorded as missed.
   if not engine.llmOff and elapsedSeconds + 2 * perTurn > budget:
     engine.llmOff = true
     engine.guardTurn = turnIndex
@@ -258,11 +239,12 @@ proc turn*(
       "remaining_s": budget - elapsedSeconds
     })
     echo "cogball: budget guard at turn ", turnIndex,
-      "; falling back to the scripted layer for the rest of the match"
+      "; skipping LLM calls for the rest of the match"
 
   var
     resolved: array[Seat, Directive]
     settled: array[Seat, bool]
+    lastCause: array[Seat, string]
     calls: seq[BatchCall]
   for seat in Seat:
     let policy = engine.policies[seat]
@@ -282,11 +264,10 @@ proc turn*(
         engine.decisions[seat].selectedAttemptId = some(teacher.attemptId)
         engine.decisions[seat].status = asAccepted
     elif engine.llmOff or engine.batch.isNil:
-      resolved[seat] = engine.fallbackFor(sim, seat, turnIndex)
-      settled[seat] = true
       let cause =
         if engine.llmOff: "budget_guard"
         else: "transport_error"
+      lastCause[seat] = cause
       engine.addRecord(%*{
         "k": "fallback", "turn": turnIndex, "seat": ord(seat),
         "attempt": 1, "cause": cause,
@@ -348,17 +329,13 @@ proc turn*(
       else:
         try:
           let payload = parseJson(reply.text)
-          let parsed = parseDirective(sim, seat, payload,
-            engine.previous[seat], engine.hasPrevious[seat],
-            sim.policyView().formationDirective(seat, turnIndex), turnIndex)
+          let parsed = parseDirective(sim, seat, payload, turnIndex)
           if parsed.usable:
             let wireAction = actionJson(sim, seat, parsed.directive)
             if evidence.origin == aoModel:
               evidence.parsedAction = newJNull()
               let generated = extractJsonObject(evidence.response.getStr())
-              let independentlyParsed = parseDirective(sim, seat, generated,
-                engine.previous[seat], engine.hasPrevious[seat],
-                sim.policyView().formationDirective(seat, turnIndex), turnIndex)
+              let independentlyParsed = parseDirective(sim, seat, generated, turnIndex)
               let proposed = if independentlyParsed.usable:
                 actionJson(sim, seat, independentlyParsed.directive) else: newJNull()
               evidence.parsedAction = proposed
@@ -374,11 +351,12 @@ proc turn*(
             settled[seat] = true
           else:
             cause = "parse_error"
-            detail = "no usable robot entry"
+            detail = if parsed.reason.len > 0: parsed.reason else: "invalid directive"
         except CatchableError as failure:
           cause = "parse_error"
           detail = failure.msg
       if cause.len > 0:
+        lastCause[seat] = cause
         evidence.accepted = false
         if evidence.origin == aoModel and evidence.response.kind == JNull and
             evidence.responseComplete != some(true):
@@ -407,30 +385,53 @@ proc turn*(
         evidence.rejectionReason = some("episode interrupted before directive installation")
     return
 
-  for call in calls:
-    # Two consecutive failures: the seat plays `formation` this turn.
-    let seat = Seat(call.seat and 1)
-    resolved[seat] = engine.fallbackFor(sim, seat, turnIndex)
-    settled[seat] = true
-
   for seat in Seat:
-    if not settled[seat]:
-      resolved[seat] = engine.fallbackFor(sim, seat, turnIndex)
-    resolved[seat].turn = int32(turnIndex)
-    engine.decisions[seat].executedAction = actionJson(sim, seat, resolved[seat])
-    sim.activeDirective[seat] = resolved[seat]
-    sim.hasDirective[seat] = true
-    engine.previous[seat] = resolved[seat]
-    engine.hasPrevious[seat] = true
-    case resolved[seat].source
-    of dsLlm: inc sim.stats[seat].llmTurns
-    of dsFallback: inc sim.stats[seat].fallbackTurns
-    of dsScripted: discard
-    # The record is the ONE source: the server writes it to the replay AND
-    # folds it back through `applyRecord`, so the feed reads identically live
-    # and in playback.
-    engine.addRecord(directiveJson(sim, seat, resolved[seat]))
+    if settled[seat]:
+      resolved[seat].turn = int32(turnIndex)
+      engine.decisions[seat].executedAction = actionJson(sim, seat, resolved[seat])
+      sim.activeDirective[seat] = resolved[seat]
+      sim.hasDirective[seat] = true
+      engine.previous[seat] = resolved[seat]
+      engine.hasPrevious[seat] = true
+      if resolved[seat].source == dsLlm:
+        inc sim.stats[seat].llmTurns
+      # The record is the ONE source: the server writes it to the replay AND
+      # folds it back through `applyRecord`, so the feed reads identically live
+      # and in playback.
+      engine.addRecord(directiveJson(sim, seat, resolved[seat]))
+    else:
+      # Missed turn: do NOT synthesize any fallback directive. The clocked
+      # simulation advances with zero actuator masks for this seat.
+      sim.hasDirective[seat] = false
+      engine.decisions[seat].selectedAttemptId = none(string)
+      engine.decisions[seat].executedAction = newJNull()
+      engine.decisions[seat].status =
+        if engine.decisions[seat].attempts.len > 0: asRejected else: asMissing
+      inc sim.stats[seat].fallbackTurns
+      let cause = if lastCause[seat].len > 0: lastCause[seat] else: "missing"
+      if engine.policies[seat].kind == pkLlm and cause in ["transport_error", "timeout"]:
+        inc engine.outageTurns[seat]
+      engine.addRecord(%*{
+        "k": "missed_turn",
+        "turn": turnIndex,
+        "seat": ord(seat),
+        "alias": seatAlias(seat),
+        "cause": cause
+      })
 
   for seat in Seat:
     engine.lastStats[seat] = sim.stats[seat]
   engine.lastGoals.setLen(0)
+
+proc hasAllGameLearnerOutage*(engine: TurnEngine, sim: SimServer): bool =
+  ## True when any LLM seat completed zero accepted turns and lost every
+  ## missed turn to provider/transport outage (not model parse errors).
+  ## Time legitimately advances on missed turns, but an all-game learner
+  ## outage is a failed evaluation rather than an ordinary scored completion.
+  for seat in Seat:
+    if engine.policies[seat].kind == pkLlm and
+        sim.stats[seat].llmTurns == 0 and
+        engine.outageTurns[seat] > 0 and
+        engine.outageTurns[seat] == int(sim.stats[seat].fallbackTurns):
+      return true
+  false

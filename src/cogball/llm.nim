@@ -204,22 +204,65 @@ type JsonProposal* = object
   node*: JsonNode
   reason*: string
 
+proc stripOuterJsonFence(text: string): tuple[ok: bool, body, reason: string] =
+  let trimmed = text.strip()
+  if trimmed.len == 0:
+    return (false, "", "empty response")
+  if not trimmed.startsWith("```"):
+    return (true, trimmed, "")
+  let firstNewline = trimmed.find('\n')
+  if firstNewline < 0:
+    return (false, "", "unterminated markdown code fence")
+  let header = trimmed[3 ..< firstNewline].strip().toLowerAscii()
+  if header.len > 0 and header != "json":
+    return (false, "", "unsupported markdown code fence language: " & header)
+  if not trimmed.endsWith("```"):
+    return (false, "", "unterminated markdown code fence")
+  let innerStart = firstNewline + 1
+  let innerEnd = trimmed.len - 3
+  if innerStart > innerEnd:
+    return (false, "", "empty markdown code fence")
+  (true, trimmed[innerStart ..< innerEnd].strip(), "")
+
 proc jsonProposal*(text: string): JsonProposal =
-  ## One domain parse boundary shared by prompt players and training bridges.
-  let first = text.find('{')
-  let last = text.rfind('}')
-  if first < 0 or last <= first:
-    return JsonProposal(node: newJNull(), reason: "no JSON object in response")
-  let body = text[first .. last]
+  ## One strict domain parse boundary shared by prompt players and training bridges.
+  ## Accepts a single raw JSON object or a single JSON object inside one standard
+  ## outer Markdown code fence (```json ... ``` or ``` ... ```). Rejects prose
+  ## prefixes/suffixes and trailing content.
+  let unfenced = stripOuterJsonFence(text)
+  if not unfenced.ok:
+    return JsonProposal(node: newJNull(), reason: unfenced.reason)
+  let body = unfenced.body
+  if body.len == 0 or body[0] != '{' or body[^1] != '}':
+    return JsonProposal(node: newJNull(), reason: "response must be a single JSON object")
   var parser: JsonParser
   parser.open(newStringStream(body), "coach response")
   defer: parser.close()
+  var depth = 0
+  var finishedObject = false
   while true:
     parser.next()
     if parser.kind == jsonError:
       return JsonProposal(node: newJNull(), reason: parser.errorMsg())
-    if parser.kind == jsonEof: break
-  JsonProposal(ok: true, node: parseJson(body))
+    if parser.kind == jsonEof:
+      break
+    if finishedObject:
+      return JsonProposal(node: newJNull(), reason: "unexpected trailing content after JSON object")
+    case parser.kind
+    of jsonObjectStart:
+      inc depth
+    of jsonObjectEnd:
+      dec depth
+      if depth == 0:
+        finishedObject = true
+    else:
+      discard
+  if not finishedObject or depth != 0:
+    return JsonProposal(node: newJNull(), reason: "incomplete JSON object")
+  let parsed = parseJson(body)
+  if parsed.kind != JObject:
+    return JsonProposal(node: newJNull(), reason: "response must be a JSON object")
+  JsonProposal(ok: true, node: parsed)
 
 proc extractJsonObject*(text: string): JsonNode =
   let proposal = jsonProposal(text)

@@ -5,8 +5,9 @@
 ## a JSON directive; the game validates it and computes the robot masks.
 ##
 ##   PLAYER_PROMPT=<strategy text>     -> an LLM seat
-##   PLAYER_SCRIPTED=formation|swarm   -> a scripted seat
-##   (none)                           -> PLAYER_SCRIPTED=formation
+##   COWORLD_LLM_ENDPOINT=<url>        -> an LLM seat
+##   PLAYER_SCRIPTED=formation|swarm   -> an explicit scripted baseline seat
+##   (none / invalid)                  -> exits with an explicit error
 ##
 ## To field your own policy, reuse this image and set PLAYER_PROMPT:
 ##   coworld upload-policy <cogball-image> --name my-cogball \
@@ -117,9 +118,19 @@ proc runDecision(call: PlayerCall) {.thread.} =
       let response = performNativePost(request.url, request.headers,
         request.body, call.deadline, call.control[])
       let text = client.completionText(response, evidence)
-      reply["action"] = extractJsonObject(text)
+      let proposal = jsonProposal(text)
+      if not proposal.ok:
+        reply["cause"] = %"parse_error"
+        evidence.rejectionReason = some(proposal.reason)
+        reply["error"] = %"model attempt failed"
+      else:
+        reply["action"] = proposal.node
     except CatchableError as failure:
-      reply["cause"] = %"transport_error"
+      let msg = failure.msg.toLowerAscii()
+      reply["cause"] = %(
+        if msg.contains("timeout") or msg.contains("timed out") or
+            msg.contains("deadline"): "timeout"
+        else: "transport_error")
       evidence.rejectionReason = some(failure.msg)
       reply["error"] = %"model attempt failed"
     reply["training_attempt"] = attemptEvidenceJson(evidence)
@@ -186,11 +197,14 @@ when isMainModule:
         if prompt.len > 0: "prompt"
         elif scriptedEnv.len > 0: "scripted"
         elif endpoint.len > 0: "prompt"
-        else: "scripted"
+        else: ""
+    if kind.len == 0:
+      quit("cogball player requires PLAYER_PROMPT, COWORLD_LLM_ENDPOINT, or explicit PLAYER_SCRIPTED=formation|swarm", 1)
     var scripted = ""
     if kind == "scripted":
-      scripted = if scriptedEnv in ["formation", "swarm"]: scriptedEnv
-                 else: "formation"
+      if scriptedEnv notin ["formation", "swarm"]:
+        quit("PLAYER_SCRIPTED must be 'formation' or 'swarm', got: " & scriptedEnv, 1)
+      scripted = scriptedEnv
 
     let registration = $ %*{
       "type": "register",
@@ -199,12 +213,12 @@ when isMainModule:
       "scripted": (if scripted.len > 0: %scripted else: newJNull()),
       "policy": (
         if label.len > 0: label
-        elif prompt.len > 0: "prompt"
+        elif kind == "prompt": "prompt"
         else: scripted)
     }
 
     echo "cogball player: connecting (",
-      (if prompt.len > 0: "prompt, " & $prompt.len & " chars"
+      (if kind == "prompt": "prompt, " & $prompt.len & " chars"
        else: "scripted " & scripted), ")"
     let timeoutSeconds = parseFloat(getEnv("COWORLD_TIMEOUT_SECONDS", "720"))
     if classify(timeoutSeconds) in {fcNan, fcInf, fcNegInf} or timeoutSeconds <= 0:
