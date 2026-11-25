@@ -170,8 +170,8 @@ jobs:
           python3 tools/test_start_chronology.py /tmp/cogball-game /tmp/cogball-chronology-player /tmp/cogball-chronology-first first
           python3 tools/test_start_chronology.py /tmp/cogball-game /tmp/cogball-chronology-player /tmp/cogball-chronology-joined joined
           python3 tools/test_native_trajectory.py /tmp/cogball-game /tmp/cogball-player /tmp/cogball-native-proof
-          for flow in /tmp/cogball-native-proof/*; do
-            /tmp/cogball-replay-check "$flow/replay.bitreplay" "$flow/trajectory.jsonl"
+          for flow in accepted invalid sampled greedy-null greedy-tokens; do
+            /tmp/cogball-replay-check "/tmp/cogball-native-proof/$flow/replay.bitreplay" "/tmp/cogball-native-proof/$flow/trajectory.jsonl"
           done
           python3 tools/test_attempt_origins.py /tmp/cogball-game /tmp/cogball-external-player /tmp/cogball-replay-check
           python3 tools/test_native_player.py /tmp/cogball-player /tmp/cogball-player-transport
