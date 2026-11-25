@@ -57,7 +57,9 @@ network="${prefix}-net"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/${slug}-smoke.XXXXXX")"
 seats=0
 
+fixture_pid=""
 cleanup() {
+  if [ -n "${fixture_pid}" ]; then kill "${fixture_pid}" 2>/dev/null || true; fi
   docker ps -aq --filter "name=${prefix}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network}" >/dev/null 2>&1 || true
   rm -rf "${work_dir}"
@@ -180,6 +182,13 @@ chmod 777 "${work_dir}"
 # Launch.
 # --------------------------------------------------------------------------
 docker network create "${network}" >/dev/null
+if [ -z "${COWORLD_LLM_ENDPOINT:-}" ]; then
+  python3 "${repo_dir}/tools/ci/model_fixture.py" "${work_dir}/fixture.port" &
+  fixture_pid=$!
+  for _ in $(seq 1 100); do [ -s "${work_dir}/fixture.port" ] && break; sleep 0.1; done
+  COWORLD_LLM_ENDPOINT="http://host.docker.internal:$(cat "${work_dir}/fixture.port")"
+  COWORLD_LLM_MODEL="fixture/cogball"
+fi
 
 if [ -n "${COWORLD_LLM_ENDPOINT:-}" ]; then
   echo "native sidecar configured for prompt players"
@@ -206,7 +215,7 @@ for ((slot = 0; slot < seats; slot++)); do
     penv+=(-e "COWORLD_LLM_ENDPOINT=${COWORLD_LLM_ENDPOINT}"
       -e "COWORLD_LLM_MODEL=${COWORLD_LLM_MODEL:-anthropic/claude-haiku-4.5}")
   fi
-  docker run -d --name "${prefix}-p${slot}" --network "${network}" \
+  docker run -d --name "${prefix}-p${slot}" --network "${network}" --add-host host.docker.internal:host-gateway \
     -e COWORLD_PLAYER_WS_URL="ws://${prefix}-game:${port}/player?slot=${slot}&token=token-${slot}" \
     ${penv[@]+"${penv[@]}"} \
     "${image}" ${pcmd[@]+"${pcmd[@]}"} >/dev/null
