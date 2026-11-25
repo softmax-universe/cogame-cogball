@@ -575,7 +575,9 @@ proc playerBatch(
             confirmEvidenceReceipt(issued.socket, frame.payload)
             if frame.payload["decision_id"] == %issued.id:
               result[position].error = "player stopped before action"
-          of pfRejected: result[position].error = "invalid player response"
+          of pfRejected:
+            result[position].error = "invalid player response"
+            result[position].cause = "parse_error"
           else: discard
         if not result[position].ok and result[position].error.len == 0: pending = true
       if not pending: break

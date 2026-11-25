@@ -409,7 +409,7 @@ proc turn*(
         if engine.decisions[seat].attempts.len > 0: asRejected else: asMissing
       inc sim.stats[seat].fallbackTurns
       let cause = if lastCause[seat].len > 0: lastCause[seat] else: "missing"
-      if engine.policies[seat].kind == pkLlm and cause != "parse_error":
+      if engine.policies[seat].kind == pkLlm and cause in ["transport_error", "timeout"]:
         inc engine.outageTurns[seat]
       engine.addRecord(%*{
         "k": "missed_turn",
