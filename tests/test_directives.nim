@@ -19,21 +19,46 @@ proc parseOf(
 
 proc validCanonicalAndFenced() =
   var sim = playing(testConfig())
-  let raw = """{"note":"press high","robots":[
- {"id":"AZ-1","role":"keeper","intent":"hold","target":[-17,0],"pass_to":null,"kick":"auto","say":"arc"},
- {"id":"AZ-2","role":"striker","intent":"shoot","target":[4,1],"pass_to":null,"kick":"auto","say":"go"},
- {"id":"AZ-3","role":"wing","intent":"pass","target":[8,-4],"pass_to":"AZ-2","kick":"never","say":"wide"}]}"""
-  for variant in [raw, "```json\n" & raw & "\n```", "```\n" & raw & "\n```"]:
+  let minimal = """{"robots":[
+ {"id":"AZ-1","intent":"hold","target":[-17,0]},
+ {"id":"AZ-2","intent":"shoot"},
+ {"id":"AZ-3","intent":"pass","pass_to":"AZ-2"}]}"""
+  for variant in [minimal, "```json\n" & minimal & "\n```", "```\n" & minimal & "\n```"]:
     let got = sim.parseOf(Azure, variant)
     doAssert got.usable, got.reason
-    doAssert got.directive.note == "press high"
+    doAssert got.directive.note == ""
     doAssert got.directive.robots[0].intent == inHold
+    doAssert got.directive.robots[0].role == roleWing
+    doAssert got.directive.robots[0].kick == kickAuto
+    doAssert got.directive.robots[0].targetX == worldXOfView(-17.0)
     doAssert got.directive.robots[1].intent == inShoot
+    doAssert got.directive.robots[1].targetX == NoTarget
+    doAssert got.directive.robots[1].targetY == NoTarget
     doAssert got.directive.robots[2].intent == inPass
     doAssert got.directive.robots[2].passTo == 1
-    doAssert got.directive.robots[2].kick == kickNever
-    doAssert got.directive.robots[0].targetX == worldXOfView(-17.0)
-  report "canonical JSON and standard outer markdown JSON fences parse"
+    let serialized = actionJson(sim, Azure, got.directive)
+    doAssert not serialized.hasKey("note")
+    doAssert not serialized["robots"][0].hasKey("pass_to")
+    doAssert not serialized["robots"][0].hasKey("kick")
+    doAssert not serialized["robots"][0].hasKey("role")
+    doAssert not serialized["robots"][0].hasKey("say")
+    doAssert serialized["robots"][0].hasKey("target")
+    doAssert not serialized["robots"][1].hasKey("target")
+    doAssert not serialized["robots"][1].hasKey("pass_to")
+    doAssert serialized["robots"][2]["pass_to"].getStr() == "AZ-2"
+    let record = directiveJson(sim, Azure, got.directive)
+    doAssert not record["robots"][0].hasKey("pass_to")
+    doAssert not record["robots"][1].hasKey("target")
+  let full = """{"note":"press high","robots":[
+ {"id":"AZ-1","role":"keeper","intent":"hold","target":[-17,0],"kick":"auto","say":"arc"},
+ {"id":"AZ-2","role":"striker","intent":"shoot","target":[4,1],"kick":"auto","say":"go"},
+ {"id":"AZ-3","role":"wing","intent":"pass","target":[8,-4],"pass_to":"AZ-2","kick":"never","say":"wide"}]}"""
+  let gotFull = sim.parseOf(Azure, full)
+  doAssert gotFull.usable, gotFull.reason
+  doAssert gotFull.directive.note == "press high"
+  doAssert gotFull.directive.robots[0].role == roleKeeper
+  doAssert gotFull.directive.robots[2].kick == kickNever
+  report "minimal and full canonical JSON and standard outer markdown fences parse and omit unused optionals"
 
 proc proseAndTrailingContentRejected() =
   let validBody = """{"note":"press high","robots":[
@@ -87,9 +112,17 @@ proc invalidEnumsAndPassToRejected() =
      {"id":"AZ-2","role":"back","intent":"clear","kick":"never","target":[0,0]},
      {"id":"AZ-3","role":"wing","intent":"pass","pass_to":null,"kick":"auto","target":[0,0]}]}""",
     """{"note":"x","robots":[
-     {"id":"AZ-1","role":"keeper","intent":"hold","kick":"auto","target":[0,0]},
-     {"id":"AZ-2","role":"back","intent":"clear","kick":"never","target":[0,0]},
-     {"id":"AZ-3","role":"wing","intent":"pass","pass_to":"AZ-3","kick":"auto","target":[0,0]}]}"""
+     {"id":"AZ-1","intent":"hold","target":[0,0]},
+     {"id":"AZ-2","intent":"clear","kick":"never"},
+     {"id":"AZ-3","intent":"pass"}]}""",
+    """{"note":"x","robots":[
+     {"id":"AZ-1","intent":"hold","target":[0,0]},
+     {"id":"AZ-2","intent":"clear","kick":null},
+     {"id":"AZ-3","intent":"chase"}]}""",
+    """{"note":"x","robots":[
+     {"id":"AZ-1","role":null,"intent":"hold","target":[0,0]},
+     {"id":"AZ-2","intent":"clear"},
+     {"id":"AZ-3","intent":"chase"}]}"""
   ]:
     let got = sim.parseOf(Azure, text)
     doAssert not got.usable, "invalid enum or pass_to was accepted: " & text
@@ -158,9 +191,9 @@ proc runeTruncation() =
   let text = $(%*{
     "note": longNote,
     "robots": [
-      {"id": "AZ-1", "role": "keeper", "intent": "hold", "target": [0, 0], "pass_to": newJNull(), "kick": "auto", "say": say},
-      {"id": "AZ-2", "role": "back", "intent": "hold", "target": [0, 0], "pass_to": newJNull(), "kick": "auto", "say": say},
-      {"id": "AZ-3", "role": "wing", "intent": "hold", "target": [0, 0], "pass_to": newJNull(), "kick": "auto", "say": say}
+      {"id": "AZ-1", "intent": "hold", "target": [0, 0], "say": say},
+      {"id": "AZ-2", "intent": "hold", "target": [0, 0], "say": say},
+      {"id": "AZ-3", "intent": "hold", "target": [0, 0], "say": say}
     ]
   })
   let got = sim.parseOf(Azure, text)

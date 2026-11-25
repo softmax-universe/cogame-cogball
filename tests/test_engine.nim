@@ -23,14 +23,14 @@ var windows: seq[Window]
 proc nowMs(): int64 = getMonoTime().ticks div 1_000_000
 
 const
-  GoodReplyAzure = """{"note":"hold the shape","robots":[
- {"id":"AZ-1","role":"keeper","intent":"hold","target":[-17,0],"pass_to":null,"kick":"auto","say":"arc"},
- {"id":"AZ-2","role":"striker","intent":"shoot","target":[3,1],"pass_to":null,"kick":"auto","say":"go"},
- {"id":"AZ-3","role":"wing","intent":"intercept","target":[8,-4],"pass_to":null,"kick":"auto","say":"wide"}]}"""
-  GoodReplyCrimson = """{"note":"hold the shape","robots":[
- {"id":"CR-1","role":"keeper","intent":"hold","target":[17,0],"pass_to":null,"kick":"auto","say":"arc"},
- {"id":"CR-2","role":"striker","intent":"shoot","target":[-3,1],"pass_to":null,"kick":"auto","say":"go"},
- {"id":"CR-3","role":"wing","intent":"intercept","target":[-8,-4],"pass_to":null,"kick":"auto","say":"wide"}]}"""
+  GoodReplyAzure = """{"robots":[
+ {"id":"AZ-1","intent":"hold","target":[-17,0]},
+ {"id":"AZ-2","intent":"shoot"},
+ {"id":"AZ-3","intent":"intercept","target":[8,-4]}]}"""
+  GoodReplyCrimson = """{"robots":[
+ {"id":"CR-1","intent":"hold","target":[17,0]},
+ {"id":"CR-2","intent":"shoot"},
+ {"id":"CR-3","intent":"intercept","target":[-8,-4]}]}"""
 
 proc goodReplyFor(seat: int): string =
   if (seat and 1) == 0: GoodReplyAzure else: GoodReplyCrimson
@@ -616,6 +616,55 @@ proc disconnectKeepsPlaying() =
     "the seat did not revive on reconnect"
   report "a dropped seat records missed turns with zero masks and revives on reconnect"
 
+proc outageClassification() =
+  ## All-game provider/transport outage on an LLM seat is flagged as a failed
+  ## evaluation, whereas all-game parse_error or partial-turn outage is not.
+  var sim1 = playing(testConfig())
+  var engine1 = newTurnEngine(PromptSelection(),
+    proc (calls: seq[BatchCall], deadline: MonoTime): seq[BatchReply]
+        {.closure, gcsafe.} =
+      for call in calls:
+        result.add BatchReply(seat: call.seat, error: "503", cause: "transport_error"))
+  engine1.policies[Azure] = SeatPolicy(kind: pkLlm, label: "learner", connected: true)
+  engine1.policies[Crimson] = SeatPolicy(kind: pkScripted, baseline: "formation", label: "formation", connected: true)
+  engine1.turn(sim1, 0, 0)
+  engine1.turn(sim1, 1, 0)
+  doAssert engine1.hasAllGameLearnerOutage(sim1),
+    "all-game transport outage was not flagged"
+
+  var sim2 = playing(testConfig())
+  var engine2 = newTurnEngine(PromptSelection(),
+    proc (calls: seq[BatchCall], deadline: MonoTime): seq[BatchReply]
+        {.closure, gcsafe.} =
+      for call in calls:
+        result.add BatchReply(seat: call.seat, ok: true, text: "not json"))
+  engine2.policies[Azure] = SeatPolicy(kind: pkLlm, label: "learner", connected: true)
+  engine2.policies[Crimson] = SeatPolicy(kind: pkScripted, baseline: "formation", label: "formation", connected: true)
+  engine2.turn(sim2, 0, 0)
+  engine2.turn(sim2, 1, 0)
+  doAssert not engine2.hasAllGameLearnerOutage(sim2),
+    "parse_error should not be classified as provider/transport outage"
+
+  var sim3 = playing(testConfig())
+  var turnNo = 0
+  var engine3 = newTurnEngine(PromptSelection(),
+    proc (calls: seq[BatchCall], deadline: MonoTime): seq[BatchReply]
+        {.closure, gcsafe.} =
+      {.cast(gcsafe).}:
+        inc turnNo
+        for call in calls:
+          if turnNo <= 2:
+            result.add BatchReply(seat: call.seat, error: "Timeout was reached", cause: "timeout")
+          else:
+            result.add BatchReply(seat: call.seat, ok: true, text: goodReplyFor(call.seat)))
+  engine3.policies[Azure] = SeatPolicy(kind: pkLlm, label: "learner", connected: true)
+  engine3.policies[Crimson] = SeatPolicy(kind: pkScripted, baseline: "formation", label: "formation", connected: true)
+  engine3.turn(sim3, 0, 0)
+  engine3.turn(sim3, 1, 0)
+  doAssert not engine3.hasAllGameLearnerOutage(sim3),
+    "partial-turn outage with accepted turns should still complete normally"
+  report "all-game learner transport outage is separated from parse_error and partial missed turns"
+
 when isMainModule:
   echo "test_engine"
   oneParallelBatch()
@@ -634,4 +683,5 @@ when isMainModule:
   physicsGuardTripsAndLeavesAPartialReplay()
   seatsAlwaysScoreToOne()
   disconnectKeepsPlaying()
+  outageClassification()
   echo "test_engine: all good"

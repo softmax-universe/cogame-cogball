@@ -45,9 +45,9 @@ while true:
     attempt.rejectionReason = none(string)
     var robots = newJArray()
     for robot in packet["observation"]["your_robots"]:
-      robots.add(%*{"id": robot["id"], "role": "wing", "intent": "hold",
-        "target": robot["pos"], "pass_to": newJNull(), "kick": "never", "say": ""})
-    let action = %*{"note": "", "robots": robots}
+      robots.add(%*{"id": robot["id"], "intent": "hold",
+        "target": robot["pos"], "kick": "never"})
+    let action = %*{"robots": robots}
     attempt.response = %($action)
     attempt.rawResponse = %($ %*{"model": "fixture/asserted",
       "content": [{"type": "text", "text": $action}]})

@@ -1048,6 +1048,10 @@ proc runGameLoop(
               engine.noteGoal(sim.tickCount, int(sim.lastGoalBy), seat)
           sim.stepEvents(broadcastTracker, frameEvents)
           if sim.phase == GameOver and sim.gameOverTimer <= 0:
+            if sim.endReason == reasonComplete and engine.hasAllGameLearnerOutage(sim):
+              echo "cogball: all-game learner provider/transport outage; marking episode failed"
+              sim.endReason = reasonFault
+              sim.endRule = erHostError
             # The `result` record is written at the very END, so its finalTick is
             # the same number results.json reports.
             if not resultRecordWritten:

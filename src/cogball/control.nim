@@ -155,8 +155,8 @@ proc compileMask*(
     aimX = ball.x
     aimY = ball.y
 
-  if intent != inHold:
-    # Every intent except hold blends the directive target as a 20% bias.
+  if intent != inHold and order.targetX != NoTarget and order.targetY != NoTarget:
+    # Optional target bias for non-hold intents: 20% blend when supplied.
     px = int32((int64(px) * 4 + int64(order.targetX)) div 5)
     py = int32((int64(py) * 4 + int64(order.targetY)) div 5)
 

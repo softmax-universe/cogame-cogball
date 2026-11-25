@@ -126,7 +126,11 @@ proc runDecision(call: PlayerCall) {.thread.} =
       else:
         reply["action"] = proposal.node
     except CatchableError as failure:
-      reply["cause"] = %"transport_error"
+      let msg = failure.msg.toLowerAscii()
+      reply["cause"] = %(
+        if msg.contains("timeout") or msg.contains("timed out") or
+            msg.contains("deadline"): "timeout"
+        else: "transport_error")
       evidence.rejectionReason = some(failure.msg)
       reply["error"] = %"model attempt failed"
     reply["training_attempt"] = attemptEvidenceJson(evidence)

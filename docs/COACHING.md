@@ -47,37 +47,34 @@ Reply with a single JSON object (optionally wrapped in a standard outer
 ```` ```json ```` code fence) and nothing else:
 
 ```json
-{"note": "compact, keeper stays home",
- "robots": [
-   {"id": "AZ-1", "role": "keeper", "intent": "hold",
-    "target": [-17.0, 0.4], "pass_to": null,
-    "kick": "auto", "say": "holding the arc"},
-   {"id": "AZ-2", "role": "striker", "intent": "shoot",
-    "target": [4.0, 0.0], "pass_to": null,
-    "kick": "auto", "say": "shooting"},
-   {"id": "AZ-3", "role": "wing", "intent": "intercept",
-    "target": [8.0, -4.0], "pass_to": null,
-    "kick": "auto", "say": "wide"}
+{"robots": [
+   {"id": "AZ-1", "intent": "hold", "target": [-17.0, 0.4]},
+   {"id": "AZ-2", "intent": "shoot"},
+   {"id": "AZ-3", "intent": "pass", "pass_to": "AZ-2"}
  ]}
 ```
 
-| field | legal values |
-|---|---|
-| `note` | optional string, ≤ 160 runes (truncated on rune boundary) |
-| `robots` | array of exactly your three robots (`AZ-1..3` or `CR-1..3`) |
-| `id` | exact robot id for your seat (`AZ-1..3` for Azure, `CR-1..3` for Crimson) |
-| `role` | `"keeper"`, `"back"`, `"wing"`, or `"striker"` |
-| `intent` | `"chase"`, `"intercept"`, `"hold"`, `"shoot"`, `"pass"`, `"clear"`, or `"press"` |
-| `target` | `[x, y]` JSON array of two finite numbers in metres (`x ∈ [-20, 20]`, `y ∈ [-12.5, 12.5]`) |
-| `pass_to` | teammate id ≠ self (required when `intent` is `"pass"`), or `null` |
-| `kick` | `"auto"` or `"never"` |
-| `say` | optional string, ≤ 48 runes (truncated on rune boundary) |
+| field | requirement | legal values / default |
+|---|---|---|
+| `robots` | required | array of exactly your three robots (`AZ-1..3` or `CR-1..3`) |
+| `id` | required | exact robot id for your seat (`AZ-1..3` for Azure, `CR-1..3` for Crimson) |
+| `intent` | required | `"chase"`, `"intercept"`, `"hold"`, `"shoot"`, `"pass"`, `"clear"`, or `"press"` |
+| `target` | required for `"hold"`; optional otherwise | `[x, y]` JSON array of two finite numbers in metres (`x ∈ [-20, 20]`, `y ∈ [-12.5, 12.5]`); omitted on non-`hold` intents applies no target bias |
+| `pass_to` | required for `"pass"`; omit otherwise | teammate id ≠ self |
+| `kick` | optional | `"auto"` (default) or `"never"` |
+| `role` | optional | decorative label `"keeper"`, `"back"`, `"wing"` (default), or `"striker"` |
+| `say` | optional | string, ≤ 48 runes (default `""`, truncated on rune boundary) |
+| `note` | optional | string, ≤ 160 runes (default `""`, truncated on rune boundary) |
 
-Parsing is strict: invalid JSON, prose outside the JSON object/fence, unknown
-enums, missing/duplicate/wrong-team robot ids, out-of-bounds targets, or a
-`pass` intent without a valid teammate `pass_to` are rejected explicitly. After
-one retry, a failed turn is recorded as a missed turn with zero actuator input
-(no implicit fallback directive is synthesized).
+Parsing is strict on supplied values and never synthesizes fallback orders:
+invalid JSON, prose outside the JSON object/fence, unknown enums,
+missing/duplicate/wrong-team robot ids, out-of-bounds targets, `"hold"` without
+`target`, or `"pass"` without a valid teammate `pass_to` are rejected
+explicitly. Omitted optional fields take their fixed documented defaults above.
+After one retry, a failed turn is recorded as a missed turn with zero actuator
+input (no implicit fallback directive is synthesized). If an LLM seat completes
+zero turns and loses every turn to provider/transport outage, the episode is
+marked failed (`fault/host_error`) rather than an ordinary scored completion.
 
 ## What each intent actually does
 

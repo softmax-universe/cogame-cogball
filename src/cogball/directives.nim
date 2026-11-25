@@ -9,9 +9,10 @@
 ##    replay bytes render in a browser but fail a strict parser.
 ## 2. **Parsing is strict and never synthesizes fallback orders.** Replies must
 ##    provide the canonical JSON shape with exact robot IDs for all three of the
-##    seat's robots, valid enums, in-bounds numeric `[x, y]` targets, and a valid
-##    teammate `pass_to` whenever `intent` is `"pass"`. Invalid replies are
-##    rejected explicitly with a reason.
+##    seat's robots, valid intents, a `[x, y]` target when `intent` is `"hold"`,
+##    and a valid teammate `pass_to` when `intent` is `"pass"`. Optional fields
+##    (`kick`, `role`, non-hold `target`, `note`, `say`) use fixed documented
+##    defaults when omitted, and supplied invalid values are rejected explicitly.
 
 import
   std/[json, math, unicode],
@@ -121,39 +122,59 @@ proc emptyDirective*(seat: Seat): Directive =
       passTo: -1, kick: kickAuto, say: "")
   discard seat
 
+proc robotOrderJson(
+  seat: Seat,
+  slot: int,
+  order: RobotOrder,
+  rounded: bool
+): JsonNode =
+  result = %*{
+    "id": robotId(firstRobotOf(seat) + slot),
+    "intent": intentText(order.intent)
+  }
+  if order.targetX != NoTarget and order.targetY != NoTarget:
+    result["target"] =
+      if rounded: %*[round2(viewX(order.targetX)), round2(viewY(order.targetY))]
+      else: %*[viewX(order.targetX), viewY(order.targetY)]
+  if order.intent == inPass and order.passTo >= 0:
+    result["pass_to"] = %robotId(int(order.passTo))
+  if order.kick != kickAuto:
+    result["kick"] = %kickText(order.kick)
+  if order.role != roleWing:
+    result["role"] = %roleText(order.role)
+  if order.say.len > 0:
+    result["say"] = %order.say
+
 proc directiveJson*(sim: SimServer, seat: Seat, directive: Directive): JsonNode =
   ## The `directive` replay chat record. Capped at MaxDirectiveRecordRunes by
-  ## the caller (`recordRunes` below).
+  ## the caller (`recordRunes` below). Omits unused optionals rather than
+  ## emitting null placeholders.
+  discard sim
   var robots = newJArray()
   for slot in 0 ..< RobotsPerSeat:
-    let order = directive.robots[slot]
-    robots.add(%*{
-      "id": robotId(firstRobotOf(seat) + slot),
-      "role": roleText(order.role),
-      "intent": intentText(order.intent),
-      "target": [round2(viewX(order.targetX)), round2(viewY(order.targetY))],
-      "pass_to": (if order.passTo >= 0: %robotId(int(order.passTo)) else: newJNull()),
-      "kick": kickText(order.kick),
-      "say": order.say
-    })
-  %*{
+    robots.add(robotOrderJson(seat, slot, directive.robots[slot], rounded = true))
+  result = %*{
     "k": "directive",
     "turn": directive.turn,
     "seat": ord(seat),
     "alias": seatAlias(seat),
     "source": sourceText(directive.source),
     "latency_ms": directive.latencyMs,
-    "note": directive.note,
     "robots": robots
   }
+  if directive.note.len > 0:
+    result["note"] = %directive.note
 
 proc actionJson*(sim: SimServer, seat: Seat, directive: Directive): JsonNode =
   ## Exact installed control directive; spectator records round positions for display.
-  let record = sim.directiveJson(seat, directive)
-  result = %*{"note": record["note"], "robots": record["robots"]}
+  ## Omits unused optionals rather than emitting null placeholders.
+  discard sim
+  var robots = newJArray()
   for slot in 0 ..< RobotsPerSeat:
-    result["robots"][slot]["target"] = %*[viewX(directive.robots[slot].targetX),
-      viewY(directive.robots[slot].targetY)]
+    robots.add(robotOrderJson(seat, slot, directive.robots[slot], rounded = false))
+  result = %*{"robots": robots}
+  if directive.note.len > 0:
+    result["note"] = %directive.note
 
 proc clipJsonStrings(node: JsonNode, budget: int): JsonNode =
   ## A copy of `node` with every STRING VALUE clipped to `budget` runes. Keys
@@ -246,9 +267,9 @@ proc parseDirective*(
   if payload.isNil or payload.kind != JObject:
     return rejectDirective("directive must be a JSON object")
   var directive = Directive(turn: int32(turn), source: dsLlm)
-  if payload.hasKey("note") and payload["note"].kind != JNull:
+  if payload.hasKey("note"):
     if payload["note"].kind != JString:
-      return rejectDirective("note must be a string or null")
+      return rejectDirective("note must be a string")
     directive.note = clipRunes(payload["note"].getStr(), MaxNoteRunes)
 
   if not payload.hasKey("robots") or payload["robots"].kind != JArray:
@@ -273,33 +294,44 @@ proc parseDirective*(
       return rejectDirective("duplicate robot id: " & rawId)
     filled[slot] = true
 
-    var order = RobotOrder(passTo: -1'i32)
-    if not entry.hasKey("role") or entry["role"].kind != JString or
-        not parseRole(entry["role"].getStr(), order.role):
-      return rejectDirective("invalid role for " & rawId)
+    var order = RobotOrder(
+      role: roleWing,
+      targetX: NoTarget,
+      targetY: NoTarget,
+      passTo: -1'i32,
+      kick: kickAuto
+    )
     if not entry.hasKey("intent") or entry["intent"].kind != JString or
         not parseIntent(entry["intent"].getStr(), order.intent):
       return rejectDirective("invalid intent for " & rawId)
-    if not entry.hasKey("kick") or entry["kick"].kind != JString or
-        not parseKick(entry["kick"].getStr(), order.kick):
-      return rejectDirective("invalid kick for " & rawId)
+    if entry.hasKey("role"):
+      if entry["role"].kind != JString or
+          not parseRole(entry["role"].getStr(), order.role):
+        return rejectDirective("invalid role for " & rawId)
+    if entry.hasKey("kick"):
+      if entry["kick"].kind != JString or
+          not parseKick(entry["kick"].getStr(), order.kick):
+        return rejectDirective("invalid kick for " & rawId)
 
-    if not entry.hasKey("target") or entry["target"].kind != JArray or entry["target"].len != 2:
-      return rejectDirective("target for " & rawId & " must be a [x, y] array")
-    var okX = false
-    var okY = false
-    let vx = finiteNumberOf(entry["target"][0], okX)
-    let vy = finiteNumberOf(entry["target"][1], okY)
-    if not okX or not okY:
-      return rejectDirective("target coordinates for " & rawId & " must be finite numbers")
-    if vx < -ViewHalfW or vx > ViewHalfW or vy < -ViewHalfH or vy > ViewHalfH:
-      return rejectDirective("target coordinates for " & rawId & " out of pitch bounds")
-    order.targetX = worldXOfView(vx)
-    order.targetY = worldYOfView(vy)
+    if entry.hasKey("target"):
+      if entry["target"].kind != JArray or entry["target"].len != 2:
+        return rejectDirective("target for " & rawId & " must be a [x, y] array")
+      var okX = false
+      var okY = false
+      let vx = finiteNumberOf(entry["target"][0], okX)
+      let vy = finiteNumberOf(entry["target"][1], okY)
+      if not okX or not okY:
+        return rejectDirective("target coordinates for " & rawId & " must be finite numbers")
+      if vx < -ViewHalfW or vx > ViewHalfW or vy < -ViewHalfH or vy > ViewHalfH:
+        return rejectDirective("target coordinates for " & rawId & " out of pitch bounds")
+      order.targetX = worldXOfView(vx)
+      order.targetY = worldYOfView(vy)
+    elif order.intent == inHold:
+      return rejectDirective("hold intent for " & rawId & " requires a [x, y] target")
 
     if entry.hasKey("pass_to") and entry["pass_to"].kind != JNull:
       if entry["pass_to"].kind != JString:
-        return rejectDirective("pass_to for " & rawId & " must be a teammate id or null")
+        return rejectDirective("pass_to for " & rawId & " must be a teammate id")
       let passId = entry["pass_to"].getStr()
       let mate = robotIndexOfId(passId)
       if mate < 0 or mate == index or seatOfRobot(mate) != seat:
@@ -308,9 +340,9 @@ proc parseDirective*(
     if order.intent == inPass and order.passTo < 0:
       return rejectDirective("pass intent for " & rawId & " requires a valid teammate pass_to")
 
-    if entry.hasKey("say") and entry["say"].kind != JNull:
+    if entry.hasKey("say"):
       if entry["say"].kind != JString:
-        return rejectDirective("say for " & rawId & " must be a string or null")
+        return rejectDirective("say for " & rawId & " must be a string")
       order.say = clipRunes(entry["say"].getStr(), MaxSayRunes)
 
     directive.robots[slot] = order

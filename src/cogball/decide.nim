@@ -61,6 +61,7 @@ type
     llmOff*: bool
     guardTurn*: int
     turnsIssued*: int
+    outageTurns*: array[Seat, int]
     decisions*: array[Seat, TurnDecision]
     records*: seq[string]      ## the replay chat records this turn produced.
 
@@ -407,14 +408,30 @@ proc turn*(
       engine.decisions[seat].status =
         if engine.decisions[seat].attempts.len > 0: asRejected else: asMissing
       inc sim.stats[seat].fallbackTurns
+      let cause = if lastCause[seat].len > 0: lastCause[seat] else: "missing"
+      if engine.policies[seat].kind == pkLlm and cause != "parse_error":
+        inc engine.outageTurns[seat]
       engine.addRecord(%*{
         "k": "missed_turn",
         "turn": turnIndex,
         "seat": ord(seat),
         "alias": seatAlias(seat),
-        "cause": (if lastCause[seat].len > 0: lastCause[seat] else: "missing")
+        "cause": cause
       })
 
   for seat in Seat:
     engine.lastStats[seat] = sim.stats[seat]
   engine.lastGoals.setLen(0)
+
+proc hasAllGameLearnerOutage*(engine: TurnEngine, sim: SimServer): bool =
+  ## True when any LLM seat completed zero accepted turns and lost every
+  ## missed turn to provider/transport outage (not model parse errors).
+  ## Time legitimately advances on missed turns, but an all-game learner
+  ## outage is a failed evaluation rather than an ordinary scored completion.
+  for seat in Seat:
+    if engine.policies[seat].kind == pkLlm and
+        sim.stats[seat].llmTurns == 0 and
+        engine.outageTurns[seat] > 0 and
+        engine.outageTurns[seat] == int(sim.stats[seat].fallbackTurns):
+      return true
+  false
