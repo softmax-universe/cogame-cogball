@@ -167,10 +167,10 @@ detail.
 
 A seat that never connects does **not** end the episode. After
 `lobbyJoinTimeoutTicks` (2400 = 100 s) the no-show is reported to
-`COGAME_PLAYER_FAILURE_URI`, its trio is driven by the `formation` baseline for
-the whole match, and the match plays to full time. A seat that drops mid-match
-keeps playing the same way and revives on reconnect. **No failure mode leaves a
-robot unactuated.**
+`COGAME_PLAYER_FAILURE_URI` and the match plays to full time with that seat
+recording missed turns (zero actuator masks, no implicit scripted fallback). A
+seat that drops mid-match similarly records missed turns with zero actuator
+masks until it reconnects.
 
 ## Determinism
 

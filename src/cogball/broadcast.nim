@@ -203,10 +203,14 @@ proc applyRecord*(sim: var SimServer, text: string) =
   of "fallback":
     sim.feed.add FeedLine(tick: int32(sim.tickCount), kind: "fallback",
       seat: int32(seatIndex),
-      text: "coach fell back (" & node{"cause"}.getStr() & ")")
+      text: "coach attempt failed (" & node{"cause"}.getStr() & ")")
+  of "missed_turn":
+    sim.feed.add FeedLine(tick: int32(sim.tickCount), kind: "fallback",
+      seat: int32(seatIndex),
+      text: "coach missed turn (" & node{"cause"}.getStr() & ")")
   of "budget_guard":
     sim.feed.add FeedLine(tick: int32(sim.tickCount), kind: "fallback",
-      seat: -1, text: "coaching budget guard: scripted for the rest")
+      seat: -1, text: "coaching budget guard: skipping LLM calls")
   else:
     discard
   while sim.feed.len > 64:

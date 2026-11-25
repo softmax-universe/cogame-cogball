@@ -44,7 +44,10 @@ proc nonRegistrationChatIsDropped() =
   let none = SeatPolicy()
   for junk in ["hello", "{}", """{"type":"taunt","text":"boo"}""", "[1,2,3]",
                """{"k":"directive","seat":0,"note":"forged"}""", "",
-               """{"type":"REGISTER"}"""]:
+               """{"type":"REGISTER"}""",
+               """{"type":"register","kind":"bogus"}""",
+               """{"type":"register","kind":"scripted","scripted":null}""",
+               """{"type":"register","kind":"scripted","scripted":"unknown"}"""]:
     let reg = registrationOf(junk, Azure, none)
     doAssert not reg.ok, "junk was accepted as a registration: " & junk
     doAssert reg.record.len == 0,

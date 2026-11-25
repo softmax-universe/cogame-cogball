@@ -423,13 +423,16 @@ proc registrationOf*(
     policy.operatorPrompt = parsed.node["prompt"].getStr()
     policy.kind = pkLlm
     policy.baseline = ""
-  else:
+  elif kind == "scripted":
+    if scripted.kind != JString:
+      return (false, previous, "")
+    let baseline = scripted.getStr().strip().toLowerAscii()
+    if baseline notin ["formation", "swarm"]:
+      return (false, previous, "")
     policy.kind = pkScripted
-    policy.baseline =
-      if scripted.kind == JString and scripted.getStr().len > 0:
-        scripted.getStr()
-      else:
-        "formation"
+    policy.baseline = baseline
+  else:
+    return (false, previous, "")
   policy.label = if label.len > 0: label else: policyKindText(policy.kind)
   # Only an actual policy change earns another record.
   let unchanged =
@@ -673,7 +676,7 @@ proc runGameLoop(
     if runtimeConfig.config.len > 0: runtimeConfig.config else: "{}")), nil)
   for seat in Seat:
     engine.policies[seat] = SeatPolicy(
-      kind: pkScripted, baseline: "formation", label: "formation")
+      kind: pkLlm, baseline: "", label: "unregistered", connected: false)
 
   let trajectoryUri = getEnv(CogameSaveTrajectoryUriEnv)
   let capture = if trajectoryUri.len > 0 and not replayLoaded:
@@ -991,7 +994,7 @@ proc runGameLoop(
             # boundary. Turn 0 therefore fires on the first tick that has no
             # directive yet — otherwise the opening five seconds would be played
             # on the compiled-in default.
-            let opening = not (sim.hasDirective[Azure] and sim.hasDirective[Crimson])
+            let opening = engine.turnsIssued == 0
             if opening or elapsedTicks mod sim.turnTicks() == 0:
               let seconds = int((getMonoTime() - episodeStart).inSeconds)
               var seatSockets: array[Seat, WebSocket]

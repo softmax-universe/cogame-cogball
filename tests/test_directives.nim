@@ -1,4 +1,5 @@
-## Tolerant parsing and repair, and the rune-boundary truncation rule.
+## Strict canonical directive parsing, outer Markdown JSON fence support,
+## and the rune-boundary truncation rule.
 ##
 ## A byte-truncated multi-byte character is exactly the bug that makes replay
 ## bytes render in a browser but fail a strict parser, so the emoji case here
@@ -11,120 +12,139 @@ import cogball/[broadcast, llm]
 proc parseOf(
   sim: SimServer,
   seat: Seat,
-  text: string,
-  hasPrevious = false
-): tuple[directive: Directive, usable: bool] =
+  text: string
+): tuple[directive: Directive, usable: bool, reason: string] =
   let payload = extractJsonObject(text)
-  parseDirective(sim, seat, payload, sim.policyView().formationDirective(seat, 0),
-    hasPrevious, sim.policyView().formationDirective(seat, 0), 1)
+  parseDirective(sim, seat, payload, 1)
 
-proc prosePrefixed() =
+proc validCanonicalAndFenced() =
   var sim = playing(testConfig())
-  let text = """Sure! Here is my plan for this turn.
+  let raw = """{"note":"press high","robots":[
+ {"id":"AZ-1","role":"keeper","intent":"hold","target":[-17,0],"pass_to":null,"kick":"auto","say":"arc"},
+ {"id":"AZ-2","role":"striker","intent":"shoot","target":[4,1],"pass_to":null,"kick":"auto","say":"go"},
+ {"id":"AZ-3","role":"wing","intent":"pass","target":[8,-4],"pass_to":"AZ-2","kick":"never","say":"wide"}]}"""
+  for variant in [raw, "```json\n" & raw & "\n```", "```\n" & raw & "\n```"]:
+    let got = sim.parseOf(Azure, variant)
+    doAssert got.usable, got.reason
+    doAssert got.directive.note == "press high"
+    doAssert got.directive.robots[0].intent == inHold
+    doAssert got.directive.robots[1].intent == inShoot
+    doAssert got.directive.robots[2].intent == inPass
+    doAssert got.directive.robots[2].passTo == 1
+    doAssert got.directive.robots[2].kick == kickNever
+    doAssert got.directive.robots[0].targetX == worldXOfView(-17.0)
+  report "canonical JSON and standard outer markdown JSON fences parse"
 
-```json
-{"note":"press high","robots":[
- {"id":"AZ-1","role":"keeper","intent":"hold","target":[-17,0],"kick":"auto"},
- {"id":"AZ-2","role":"striker","intent":"shoot","target":[4,1],"kick":"auto"},
- {"id":"AZ-3","role":"wing","intent":"intercept","target":[8,-4],"kick":"auto"}]}
-```
+proc proseAndTrailingContentRejected() =
+  let validBody = """{"note":"press high","robots":[
+ {"id":"AZ-1","role":"keeper","intent":"hold","target":[-17,0],"pass_to":null,"kick":"auto"},
+ {"id":"AZ-2","role":"striker","intent":"shoot","target":[4,1],"pass_to":null,"kick":"auto"},
+ {"id":"AZ-3","role":"wing","intent":"intercept","target":[8,-4],"pass_to":null,"kick":"auto"}]}"""
+  for bad in [
+    "Sure! Here is my plan:\n```json\n" & validBody & "\n```",
+    "```json\n" & validBody & "\n```\nHope that helps!",
+    "Plan: " & validBody,
+    validBody & " trailing",
+    validBody & "\n" & validBody,
+    "```yaml\n" & validBody & "\n```",
+    "I am not going to answer that."
+  ]:
+    let proposal = jsonProposal(bad)
+    doAssert not proposal.ok, "unexpectedly accepted non-canonical wrapper: " & bad
+  report "prose prefixes, suffixes, trailing JSON, and non-JSON fences are rejected"
 
-Hope that helps!"""
-  let got = sim.parseOf(Azure, text)
-  doAssert got.usable
-  doAssert got.directive.note == "press high"
-  doAssert got.directive.robots[0].intent == inHold
-  doAssert got.directive.robots[1].intent == inShoot
-  doAssert got.directive.robots[2].intent == inIntercept
-  doAssert got.directive.robots[0].targetX == worldXOfView(-17.0)
-  report "prose-prefixed, fenced JSON parses"
-
-proc objectKeyedRobots() =
+proc objectKeyedRobotsRejected() =
   var sim = playing(testConfig())
   let text = """{"note":"","robots":{
-    "AZ-3":{"role":"striker","intent":"chase","target":[0,0]},
-    "az-1":{"role":"keeper","intent":"hold","target":["-18","1.5"]},
-    "AZ-2":{"role":"back","intent":"press","target":[2,2]}}}"""
+    "AZ-3":{"role":"striker","intent":"chase","target":[0,0],"kick":"auto"},
+    "AZ-1":{"role":"keeper","intent":"hold","target":[-18,1.5],"kick":"auto"},
+    "AZ-2":{"role":"back","intent":"press","target":[2,2],"kick":"auto"}}}"""
   let got = sim.parseOf(Azure, text)
-  doAssert got.usable
-  doAssert got.directive.robots[0].intent == inHold, "AZ-1 (lowercase) misread"
-  doAssert got.directive.robots[1].intent == inPress
-  doAssert got.directive.robots[2].intent == inChase
-  doAssert got.directive.robots[0].targetX == worldXOfView(-18.0),
-    "a numeric STRING target was rejected"
-  report "an id-keyed robots object with numeric strings parses"
+  doAssert not got.usable, "an id-keyed robots object was accepted"
+  report "an id-keyed robots object is rejected"
 
-proc unknownEnumsRepair() =
+proc invalidEnumsAndPassToRejected() =
   var sim = playing(testConfig())
-  let text = """{"note":"x","robots":[
-   {"id":"AZ-1","role":"libero","intent":"nutmeg","kick":"maybe","target":[0,0]},
-   {"id":"AZ-2","role":"back","intent":"clear","kick":"never","target":[0,0]},
-   {"id":"AZ-3","role":"wing","intent":"pass","pass_to":"CR-1","target":[0,0]}]}"""
-  let got = sim.parseOf(Azure, text)
-  doAssert got.usable
-  doAssert got.directive.robots[0].role == roleWing, "unknown role repaired wrong"
-  doAssert got.directive.robots[0].intent == inChase,
-    "unknown intent repaired wrong"
-  doAssert got.directive.robots[0].kick == kickAuto,
-    "unknown kick repaired wrong"
-  doAssert got.directive.robots[1].kick == kickNever
-  doAssert got.directive.robots[2].passTo == -1,
-    "pass_to accepted an OPPONENT"
-  report "unknown enums and a cross-team pass_to repair"
+  for text in [
+    """{"note":"x","robots":[
+     {"id":"AZ-1","role":"libero","intent":"hold","kick":"auto","target":[0,0]},
+     {"id":"AZ-2","role":"back","intent":"clear","kick":"never","target":[0,0]},
+     {"id":"AZ-3","role":"wing","intent":"chase","kick":"auto","target":[0,0]}]}""",
+    """{"note":"x","robots":[
+     {"id":"AZ-1","role":"keeper","intent":"nutmeg","kick":"auto","target":[0,0]},
+     {"id":"AZ-2","role":"back","intent":"clear","kick":"never","target":[0,0]},
+     {"id":"AZ-3","role":"wing","intent":"chase","kick":"auto","target":[0,0]}]}""",
+    """{"note":"x","robots":[
+     {"id":"AZ-1","role":"keeper","intent":"hold","kick":"maybe","target":[0,0]},
+     {"id":"AZ-2","role":"back","intent":"clear","kick":"never","target":[0,0]},
+     {"id":"AZ-3","role":"wing","intent":"chase","kick":"auto","target":[0,0]}]}""",
+    """{"note":"x","robots":[
+     {"id":"AZ-1","role":"keeper","intent":"hold","kick":"auto","target":[0,0]},
+     {"id":"AZ-2","role":"back","intent":"clear","kick":"never","target":[0,0]},
+     {"id":"AZ-3","role":"wing","intent":"pass","pass_to":"CR-1","kick":"auto","target":[0,0]}]}""",
+    """{"note":"x","robots":[
+     {"id":"AZ-1","role":"keeper","intent":"hold","kick":"auto","target":[0,0]},
+     {"id":"AZ-2","role":"back","intent":"clear","kick":"never","target":[0,0]},
+     {"id":"AZ-3","role":"wing","intent":"pass","pass_to":null,"kick":"auto","target":[0,0]}]}""",
+    """{"note":"x","robots":[
+     {"id":"AZ-1","role":"keeper","intent":"hold","kick":"auto","target":[0,0]},
+     {"id":"AZ-2","role":"back","intent":"clear","kick":"never","target":[0,0]},
+     {"id":"AZ-3","role":"wing","intent":"pass","pass_to":"AZ-3","kick":"auto","target":[0,0]}]}"""
+  ]:
+    let got = sim.parseOf(Azure, text)
+    doAssert not got.usable, "invalid enum or pass_to was accepted: " & text
+  report "unknown enums, self/opponent pass_to, and pass without pass_to are rejected"
 
-proc badTargets() =
+proc badTargetsRejected() =
   var sim = playing(testConfig())
-  sim.robots[0].x = 7_777_777'i32
-  sim.robots[0].y = 3_333_333'i32
-  let text = """{"note":"x","robots":[
-   {"id":"AZ-1","role":"back","intent":"hold"},
-   {"id":"AZ-2","role":"back","intent":"hold","target":[999,-999]},
-   {"id":"AZ-3","role":"back","intent":"hold","target":["nope","nope"]}]}"""
-  let got = sim.parseOf(Azure, text)
-  doAssert got.usable
-  doAssert got.directive.robots[0].targetX == worldXOfView(round2(viewX(sim.robots[0].x))),
-    "a missing target did not fall back to the observed robot position"
-  doAssert got.directive.robots[0].targetY == worldYOfView(round2(viewY(sim.robots[0].y)))
-  doAssert got.directive.robots[1].targetX == worldXOfView(20.0),
-    "an out-of-pitch target was not clamped"
-  doAssert got.directive.robots[1].targetY == worldYOfView(-12.5)
-  doAssert got.directive.robots[2].targetX == sim.robots[2].x,
-    "a non-numeric target did not fall back"
-  report "missing, out-of-pitch and non-numeric targets repair"
+  for text in [
+    """{"note":"x","robots":[
+     {"id":"AZ-1","role":"back","intent":"hold","kick":"auto"},
+     {"id":"AZ-2","role":"back","intent":"hold","kick":"auto","target":[0,0]},
+     {"id":"AZ-3","role":"back","intent":"hold","kick":"auto","target":[0,0]}]}""",
+    """{"note":"x","robots":[
+     {"id":"AZ-1","role":"back","intent":"hold","kick":"auto","target":[999,-999]},
+     {"id":"AZ-2","role":"back","intent":"hold","kick":"auto","target":[0,0]},
+     {"id":"AZ-3","role":"back","intent":"hold","kick":"auto","target":[0,0]}]}""",
+    """{"note":"x","robots":[
+     {"id":"AZ-1","role":"back","intent":"hold","kick":"auto","target":["-18","1.5"]},
+     {"id":"AZ-2","role":"back","intent":"hold","kick":"auto","target":[0,0]},
+     {"id":"AZ-3","role":"back","intent":"hold","kick":"auto","target":[0,0]}]}""",
+    """{"note":"x","robots":[
+     {"id":"AZ-1","role":"back","intent":"hold","kick":"auto","target":{"x":0,"y":0}},
+     {"id":"AZ-2","role":"back","intent":"hold","kick":"auto","target":[0,0]},
+     {"id":"AZ-3","role":"back","intent":"hold","kick":"auto","target":[0,0]}]}"""
+  ]:
+    let got = sim.parseOf(Azure, text)
+    doAssert not got.usable, "invalid target was accepted: " & text
+  report "missing, out-of-pitch, string, and object targets are rejected"
 
-proc wrongRobotCounts() =
+proc wrongRobotCountsAndIdsRejected() =
   var sim = playing(testConfig())
-  # Four robots: the extra entry is dropped.
-  let four = sim.parseOf(Azure, """{"robots":[
-    {"id":"AZ-1","intent":"hold","target":[1,1]},
-    {"id":"AZ-2","intent":"shoot","target":[2,2]},
-    {"id":"AZ-3","intent":"press","target":[3,3]},
-    {"id":"AZ-1","intent":"clear","target":[4,4]}]}""")
-  doAssert four.usable
-  doAssert four.directive.robots[0].intent == inHold,
-    "a duplicate id overwrote the first entry"
-  # Zero robots: nothing usable, which is the ONE case that triggers a retry.
-  let zero = sim.parseOf(Azure, """{"note":"thinking","robots":[]}""")
-  doAssert not zero.usable, "an empty robots array was treated as usable"
-  # One robot: usable; the other two come from the fallback.
-  let one = sim.parseOf(Azure, """{"robots":[{"id":"AZ-2","intent":"clear"}]}""")
-  doAssert one.usable
-  doAssert one.directive.robots[1].intent == inClear
-  report "four, zero and one robot entries all repair correctly"
-
-proc positionalAssignment() =
-  ## Unmatched ids are assigned to the seat's robots BY POSITION, in reply
-  ## order — the documented repair for a model that invents names.
-  var sim = playing(testConfig())
-  let got = sim.parseOf(Crimson, """{"robots":[
-    {"id":"striker","intent":"shoot","target":[0,0]},
-    {"id":"midfield","intent":"press","target":[0,0]},
-    {"id":"sweeper","intent":"hold","target":[0,0]}]}""")
-  doAssert got.usable
-  doAssert got.directive.robots[0].intent == inShoot
-  doAssert got.directive.robots[1].intent == inPress
-  doAssert got.directive.robots[2].intent == inHold
-  report "unmatched ids are assigned by position"
+  for text in [
+    """{"robots":[
+      {"id":"AZ-1","role":"keeper","intent":"hold","kick":"auto","target":[1,1]},
+      {"id":"AZ-2","role":"striker","intent":"shoot","kick":"auto","target":[2,2]},
+      {"id":"AZ-3","role":"wing","intent":"press","kick":"auto","target":[3,3]},
+      {"id":"AZ-1","role":"back","intent":"clear","kick":"auto","target":[4,4]}]}""",
+    """{"note":"thinking","robots":[]}""",
+    """{"robots":[{"id":"AZ-2","role":"back","intent":"clear","kick":"auto","target":[0,0]}]}""",
+    """{"robots":[
+      {"id":"AZ-1","role":"keeper","intent":"hold","kick":"auto","target":[1,1]},
+      {"id":"AZ-1","role":"striker","intent":"shoot","kick":"auto","target":[2,2]},
+      {"id":"AZ-3","role":"wing","intent":"press","kick":"auto","target":[3,3]}]}""",
+    """{"robots":[
+      {"id":"striker","role":"striker","intent":"shoot","kick":"auto","target":[0,0]},
+      {"id":"midfield","role":"wing","intent":"press","kick":"auto","target":[0,0]},
+      {"id":"sweeper","role":"back","intent":"hold","kick":"auto","target":[0,0]}]}""",
+    """{"robots":[
+      {"id":"CR-1","role":"keeper","intent":"hold","kick":"auto","target":[0,0]},
+      {"id":"CR-2","role":"striker","intent":"shoot","kick":"auto","target":[0,0]},
+      {"id":"CR-3","role":"wing","intent":"press","kick":"auto","target":[0,0]}]}"""
+  ]:
+    let got = sim.parseOf(Azure, text)
+    doAssert not got.usable, "invalid robot count or id was accepted: " & text
+  report "wrong robot counts, duplicates, invented ids, and wrong-team ids are rejected"
 
 proc runeTruncation() =
   ## A 300-character note truncates to 160 RUNES, and a `say` whose 48th and
@@ -138,13 +158,13 @@ proc runeTruncation() =
   let text = $(%*{
     "note": longNote,
     "robots": [
-      {"id": "AZ-1", "intent": "hold", "target": [0, 0], "say": say},
-      {"id": "AZ-2", "intent": "hold", "target": [0, 0], "say": say},
-      {"id": "AZ-3", "intent": "hold", "target": [0, 0], "say": say}
+      {"id": "AZ-1", "role": "keeper", "intent": "hold", "target": [0, 0], "pass_to": newJNull(), "kick": "auto", "say": say},
+      {"id": "AZ-2", "role": "back", "intent": "hold", "target": [0, 0], "pass_to": newJNull(), "kick": "auto", "say": say},
+      {"id": "AZ-3", "role": "wing", "intent": "hold", "target": [0, 0], "pass_to": newJNull(), "kick": "auto", "say": say}
     ]
   })
   let got = sim.parseOf(Azure, text)
-  doAssert got.usable
+  doAssert got.usable, got.reason
   doAssert got.directive.note.runeLen == MaxNoteRunes,
     "note truncated to " & $got.directive.note.runeLen & " runes"
   doAssert isValidUtf8(got.directive.note)
@@ -176,37 +196,21 @@ proc clipRunesIsExact() =
   doAssert isValidUtf8(cut)
   report "clipRunes counts codepoints, strips control characters and marks the cut"
 
-proc noJsonAtAll() =
-  var sim = playing(testConfig())
-  var raised = false
-  try:
-    discard sim.parseOf(Azure, "I am not going to answer that.")
-  except CatchableError:
-    raised = true
-  doAssert raised, "a reply with no JSON object was accepted"
-  report "a reply with no JSON object is rejected (and retried by the engine)"
-
 proc idParsing() =
   doAssert robotIndexOfId("AZ-1") == 0
-  doAssert robotIndexOfId("az-3") == 2
+  doAssert robotIndexOfId("AZ-3") == 2
   doAssert robotIndexOfId("CR-1") == 3
-  doAssert robotIndexOfId(" cr 2 ") == 4
+  doAssert robotIndexOfId("CR-2") == 4
+  doAssert robotIndexOfId("az-3") == -1
+  doAssert robotIndexOfId(" cr 2 ") == -1
   doAssert robotIndexOfId("AZ-4") == -1
   doAssert robotIndexOfId("XX-1") == -1
   doAssert robotIndexOfId("") == -1
   for i in 0 ..< RobotCount:
     doAssert robotIndexOfId(robotId(i)) == i
-  report "robot ids round-trip, case- and separator-tolerantly"
+  report "robot ids match canonical AZ-1..3 / CR-1..3 strictly"
 
 proc capRecordStaysParseable() =
-  ## The record cap is on the SERIALIZED object, and JSON escaping is what
-  ## makes it bite: a `"` or a `\` in a note or a say costs two runes on the
-  ## wire. A note and three says that are each legal at their own caps
-  ## (160 + 3x48) but made entirely of quotes serialize past 900 runes, and a
-  ## blind clip there would cut the object mid-key. That record would still be
-  ## valid UTF-8 and still be dropped by every reader: broadcast.applyRecord
-  ## returns on a parse failure and tools/replay_summary.py skips the line, so
-  ## phase 60 would under-count the LLM directives it exists to verify.
   var sim = playing(testConfig())
   for quoteSaturated in ["\"", "\\"]:
     var directive = sim.policyView().formationDirective(Azure, 39)
@@ -227,8 +231,6 @@ proc capRecordStaysParseable() =
     doAssert capped.runeLen <= MaxDirectiveRecordRunes,
       "capRecord returned " & $capped.runeLen & " runes"
     doAssert isValidUtf8(capped), "capRecord cut a character in half"
-    # The assertion that matters: it is still a directive record a reader can
-    # use, not a truncated string that parses as nothing.
     let node = parseJson(capped)
     doAssert node{"k"}.getStr() == "directive"
     doAssert node{"seat"}.getInt() == ord(Azure)
@@ -240,13 +242,11 @@ proc capRecordStaysParseable() =
     for entry in node{"robots"}:
       doAssert entry{"id"}.getStr().len == 4
       doAssert entry{"intent"}.getStr().len > 0
-    # And the same record folds back into the broadcast feed.
     var feedSim = playing(testConfig())
     let before = feedSim.feed.len
     feedSim.applyRecord(capped)
     doAssert feedSim.feed.len > before,
       "the capped record no longer reaches the broadcast feed"
-  # A record already inside the cap is returned unchanged.
   let small = """{"k":"directive","turn":1,"seat":0,"note":"tidy"}"""
   doAssert capRecord(small) == small
   report "a quote-saturated directive record caps to parseable JSON"
@@ -255,13 +255,12 @@ when isMainModule:
   echo "test_directives"
   idParsing()
   clipRunesIsExact()
-  prosePrefixed()
-  objectKeyedRobots()
-  unknownEnumsRepair()
-  badTargets()
-  wrongRobotCounts()
-  positionalAssignment()
+  validCanonicalAndFenced()
+  proseAndTrailingContentRejected()
+  objectKeyedRobotsRejected()
+  invalidEnumsAndPassToRejected()
+  badTargetsRejected()
+  wrongRobotCountsAndIdsRejected()
   runeTruncation()
   capRecordStaysParseable()
-  noJsonAtAll()
   echo "test_directives: all good"

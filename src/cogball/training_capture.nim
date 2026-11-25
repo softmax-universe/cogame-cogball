@@ -87,8 +87,7 @@ proc finishMatch*(capture: MatchCapture, sim: SimServer,
     staged.observation["prompt_attempts"] = promptAttempts
     capture.trajectory.recordDecision(staged.id, staged.seat, staged.observation,
       attempts, staged.decision.selectedAttemptId, staged.decision.executedAction,
-      staged.decision.status, staged.terminal,
-      (if staged.decision.status == asFallback: some("engine-formation") else: none(string)))
+      staged.decision.status, staged.terminal, none(string))
   let results = parseJson(sim.playerResultsJson())
   results["player_cleanup"] = cleanup
   results["engine_version"] = %GameVersion

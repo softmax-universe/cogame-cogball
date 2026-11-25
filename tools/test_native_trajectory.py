@@ -307,10 +307,22 @@ for flow in (
             ):
                 assert secret not in public
             if flow in {"invalid", "provider-error", "malformed-200", "timeout"}:
-                assert any(
-                    d["action_status"] == "fallback" and len(d["attempts"]) == 2
+                rejected = [
+                    d
                     for d in decisions
-                )
+                    if d["action_status"] == "rejected" and len(d["attempts"]) == 2
+                ]
+                assert rejected, f"{flow}: expected rejected decisions with 2 attempts"
+                for d in rejected:
+                    assert d["executed_action"] is None
+                    assert d["selected_attempt_id"] is None
+                    assert d["fallback_origin"] is None
+                    masks = base64.b64decode(
+                        d["observation"]["execution"]["seat_input_masks_b64"]
+                    )
+                    assert all(b == 0 for b in masks), (
+                        f"{flow}: missed turn must emit zero actuator masks"
+                    )
             archive = output / "fixture_calls.json"
             archive.write_text(
                 json.dumps(

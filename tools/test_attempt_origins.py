@@ -87,13 +87,14 @@ for attack in ("teacher", "human", "mismatch"):
             for decision in decisions:
                 if attack == "mismatch":
                     assert (
-                        decision["action_status"] == "fallback"
+                        decision["action_status"] == "rejected"
                         and decision["selected_attempt_id"] is None
+                        and decision["executed_action"] is None
+                        and decision["fallback_origin"] is None
                     )
                     assert len(decision["attempts"]) == 2
                     assert all(
                         not attempt["accepted"]
-                        and attempt["parsed_action"] != decision["executed_action"]
                         for attempt in decision["attempts"]
                     )
                 else:

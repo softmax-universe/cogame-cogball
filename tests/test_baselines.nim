@@ -59,8 +59,8 @@ proc observablePolicyOnly() =
       let changed = sim.policyView().baselineDirective(seat, baseline, 0)
       doAssert directiveJson(sim, seat, changed) == directiveJson(sim, seat, expected)
       let action = actionJson(sim, seat, expected)
-      let parsed = sim.parseDirective(seat, action, emptyDirective(seat), false, expected, 0)
-      doAssert parsed.usable
+      let parsed = sim.parseDirective(seat, action, 0)
+      doAssert parsed.usable, parsed.reason
       for slot in 0 ..< RobotsPerSeat:
         doAssert parsed.directive.robots[slot].targetX == expected.robots[slot].targetX
         doAssert parsed.directive.robots[slot].targetY == expected.robots[slot].targetY
@@ -88,14 +88,11 @@ proc boundedOrders() =
           name & ": illegal bit on " & robotId(i)
   report "500 states x both baselines produce legal, bounded orders"
 
-proc unknownBaselineIsFormation() =
+proc unknownBaselineRaises() =
   var sim = playing(testConfig())
-  let fallback = sim.policyView().baselineDirective(Azure, "not-a-baseline", 0)
-  let formation = sim.policyView().formationDirective(Azure, 0)
-  doAssert fallback.note == formation.note
-  for slot in 0 ..< RobotsPerSeat:
-    doAssert fallback.robots[slot].intent == formation.robots[slot].intent
-  report "an unknown baseline name plays `formation`"
+  doAssertRaises(CogballError):
+    discard sim.policyView().baselineDirective(Azure, "not-a-baseline", 0)
+  report "an unknown baseline name raises explicitly"
 
 proc exactlyOneKeeper() =
   ## `formation` always fields exactly one keeper, and it is the robot nearest
@@ -214,7 +211,7 @@ when isMainModule:
   echo "test_baselines"
   observablePolicyOnly()
   boundedOrders()
-  unknownBaselineIsFormation()
+  unknownBaselineRaises()
   exactlyOneKeeper()
   swarmRolesAreFixed()
   formationBeatsSwarm()

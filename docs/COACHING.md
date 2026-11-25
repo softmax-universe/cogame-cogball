@@ -43,29 +43,41 @@ to remember which side it is on.
 
 ## The directive
 
+Reply with a single JSON object (optionally wrapped in a standard outer
+```` ```json ```` code fence) and nothing else:
+
 ```json
 {"note": "compact, keeper stays home",
- "robots": [{"id": "AZ-1", "role": "keeper", "intent": "hold",
-             "target": [-17.0, 0.4], "pass_to": null,
-             "kick": "auto", "say": "holding the arc"}, "… 3 …"]}
+ "robots": [
+   {"id": "AZ-1", "role": "keeper", "intent": "hold",
+    "target": [-17.0, 0.4], "pass_to": null,
+    "kick": "auto", "say": "holding the arc"},
+   {"id": "AZ-2", "role": "striker", "intent": "shoot",
+    "target": [4.0, 0.0], "pass_to": null,
+    "kick": "auto", "say": "shooting"},
+   {"id": "AZ-3", "role": "wing", "intent": "intercept",
+    "target": [8.0, -4.0], "pass_to": null,
+    "kick": "auto", "say": "wide"}
+ ]}
 ```
 
-| field | legal values | repaired to |
-|---|---|---|
-| `note` | ≤ 160 runes | truncated |
-| `robots` | exactly your three robots | extras dropped; missing filled from last turn, else from `formation` |
-| `id` | `AZ-1..3` / `CR-1..3`, case-insensitive | unmatched ids assigned by position |
-| `role` | `keeper` `back` `wing` `striker` | `wing` |
-| `intent` | `chase` `intercept` `hold` `shoot` `pass` `clear` `press` | `chase` |
-| `target` | `[x, y]` metres | clamped into the pitch; missing → the robot's current position |
-| `pass_to` | a *teammate* id ≠ self | `null` (and `pass` degrades to `shoot`) |
-| `kick` | `auto` `never` | `auto` |
-| `say` | ≤ 48 runes | truncated |
+| field | legal values |
+|---|---|
+| `note` | optional string, ≤ 160 runes (truncated on rune boundary) |
+| `robots` | array of exactly your three robots (`AZ-1..3` or `CR-1..3`) |
+| `id` | exact robot id for your seat (`AZ-1..3` for Azure, `CR-1..3` for Crimson) |
+| `role` | `"keeper"`, `"back"`, `"wing"`, or `"striker"` |
+| `intent` | `"chase"`, `"intercept"`, `"hold"`, `"shoot"`, `"pass"`, `"clear"`, or `"press"` |
+| `target` | `[x, y]` JSON array of two finite numbers in metres (`x ∈ [-20, 20]`, `y ∈ [-12.5, 12.5]`) |
+| `pass_to` | teammate id ≠ self (required when `intent` is `"pass"`), or `null` |
+| `kick` | `"auto"` or `"never"` |
+| `say` | optional string, ≤ 48 runes (truncated on rune boundary) |
 
-Parsing is deliberately forgiving: markdown fences, a prose prefix, an
-id-keyed `robots` object, numeric strings and unknown enums all repair. Only
-when no usable robot entry can be recovered at all does the turn retry once,
-and then fall back to the `formation` baseline.
+Parsing is strict: invalid JSON, prose outside the JSON object/fence, unknown
+enums, missing/duplicate/wrong-team robot ids, out-of-bounds targets, or a
+`pass` intent without a valid teammate `pass_to` are rejected explicitly. After
+one retry, a failed turn is recorded as a missed turn with zero actuator input
+(no implicit fallback directive is synthesized).
 
 ## What each intent actually does
 
@@ -131,14 +143,13 @@ baseline instead — the same directive shape, no LLM, microseconds per turn.
 ## Degrading
 
 Every wait is bounded. Both seats' requests go out as **one parallel batch** per
-turn with a 6.0 s deadline; anything that timed out, errored, returned non-JSON
-or returned no usable robot entry is retried **once** as a single batch with a
-2.5 s deadline, all inside a 9.0 s monotonic per-turn cap. Player transport
-allowances remain in milliseconds: 6000 for the first attempt and 2500 for
-repair, clipped to the remaining 9000 ms absolute turn deadline. Two consecutive
-failures play the `formation` directive and write a `fallback` record naming the
-cause. If the wall clock gets close to the budget, a `budget_guard` record fires
-and the rest of the match runs on the scripted layer, so the episode ends
-`complete/full_time` rather than `deadline`.
-
-None of that is a punishment: it is why a slow model never costs you the match.
+turn with a 6.0 s deadline; anything that timed out, errored, or returned an
+invalid directive is retried **once** as a single batch with a 2.5 s deadline,
+all inside a 9.0 s monotonic per-turn cap. Player transport allowances remain
+in milliseconds: 6000 for the first attempt and 2500 for repair, clipped to the
+remaining 9000 ms absolute turn deadline. Two consecutive failures record a
+`missed_turn` with zero actuator input for that seat (no fallback directive is
+synthesized) and preserve the failed attempts' raw data. If the wall clock gets
+close to the budget, a `budget_guard` record fires and remaining LLM turns are
+skipped as missed turns so the episode ends `complete/full_time` rather than
+`deadline`.

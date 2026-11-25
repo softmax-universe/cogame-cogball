@@ -167,7 +167,7 @@ for variant in ("default", "sprint"):
                 )
                 assert (
                     consumed["kind"] == "consumed_rejection"
-                    and "robots" in consumed["action"]
+                    and consumed["action"] is None
                 )
                 observation = consumed["observation"]
             else:

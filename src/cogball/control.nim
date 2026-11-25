@@ -248,10 +248,11 @@ proc compileMasks*(
   sim: SimServer,
   directives: array[Seat, Directive]
 ): array[RobotCount, uint8] =
-  ## The six masks for one tick, in robot index order. Every robot always has
-  ## a directive, so no failure mode can leave one unactuated. During the
-  ## kickoff freeze every mask is zero.
+  ## The six masks for one tick, in robot index order. A seat with no active
+  ## directive (missed turn) emits zero masks without synthesizing an action.
+  ## During the kickoff freeze every mask is zero.
   if sim.phase != Playing or int32(sim.tickCount) < sim.freezeUntil:
     return
   for i in 0 ..< RobotCount:
-    result[i] = sim.compileMask(i, directives[seatOfRobot(i)])
+    if sim.hasDirective[seatOfRobot(i)]:
+      result[i] = sim.compileMask(i, directives[seatOfRobot(i)])

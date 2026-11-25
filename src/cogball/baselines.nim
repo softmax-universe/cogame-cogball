@@ -228,12 +228,14 @@ proc baselineDirective*(
   name: string,
   turn: int
 ): Directive =
-  ## Dispatch by baseline name. An unknown name is `formation` — a seat that
-  ## sets neither PLAYER_PROMPT nor PLAYER_SCRIPTED plays it too.
-  if name.strip().toLowerAscii() == "swarm":
+  ## Dispatch by explicit baseline name (`formation` or `swarm`).
+  case name.strip().toLowerAscii()
+  of "formation":
+    sim.formationDirective(seat, turn)
+  of "swarm":
     sim.swarmDirective(seat, turn)
   else:
-    sim.formationDirective(seat, turn)
+    raise newException(CogballError, "unknown scripted baseline: " & name)
 
 proc ballInOwnHalf*(sim: SimServer, seat: Seat): bool {.inline.} =
   sim.policyView().ballInOwnHalf(seat)
