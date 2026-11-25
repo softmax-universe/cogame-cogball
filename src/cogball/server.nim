@@ -382,11 +382,11 @@ proc runFrameLimiter(
     slept = true
   previousTick = getMonoTime()
 
-proc declarePlayerFailure*(slot: int, message: string, deadline: MonoTime) =
+proc declarePlayerFailure*(slot: int, message, kind: string, deadline: MonoTime) =
   ## The platform polls this source-owned no-show declaration.
   let uri = getEnv("COGAME_PLAYER_FAILURE_URI")
   if uri.len > 0:
-    writeCogameArtifact(uri, $(%*{"failed_policy_index": slot, "message": message}),
+    writeCogameArtifact(uri, $(%*{"failed_policy_index": slot, "message": message, "kind": kind}),
       "application/json", "COGAME_PLAYER_FAILURE_URI", deadline)
 
 proc parseRegistration*(text: string): tuple[ok: bool, node: JsonNode] =
@@ -693,7 +693,6 @@ proc runGameLoop(
       if replayLoaded: move(initializedReplay.tracker)
       else: initBroadcastTracker()
     quitAfterFrame = false
-    failureDeclared = false
     episodeDeadlineReached = false
     lastGoalsSeen: array[Seat, int32]
     resultRecordWritten = false
@@ -953,21 +952,14 @@ proc runGameLoop(
           sim.players[index].registered = true
         recordAndWrite(reg.record)
 
-      # A seat that never connects does NOT end the episode: the no-show is
-      # declared, its trio plays the `formation` baseline, and the match runs to
-      # full time.
-      if not replayLoaded and sim.lobbyJoinTimedOut() and not failureDeclared:
-        failureDeclared = true
+      if not replayLoaded and sim.lobbyJoinTimedOut():
         let stuck = sim.nextPlayerSlot()
-        declarePlayerFailure(stuck,
-          "player slot " & $stuck & " never joined the lobby within " &
-            $config.lobbyJoinTimeoutTicks & " lobby ticks (~" &
-            $(config.lobbyJoinTimeoutTicks div TargetFps) & "s)",
-          min(episodeStart + initDuration(seconds = config.wallClockBudgetSeconds),
-            getMonoTime() + initDuration(milliseconds = 5000)))
-        echo "cogball: lobby join timeout on slot ", stuck,
-          "; starting with the scripted baseline in that seat"
-        sim.startGame()
+        declarePlayerFailure(stuck, "Player did not join the lobby", "episode_inconclusive",
+          getMonoTime() + initDuration(seconds = 5))
+        sim.endReason = reasonFault
+        sim.endRule = erHostError
+        writeArtifacts(esFailed)
+        break
 
       var frameEvents = newJArray()
       if replayLoaded:
@@ -1050,8 +1042,10 @@ proc runGameLoop(
               engine.noteGoal(sim.tickCount, int(sim.lastGoalBy), seat)
           sim.stepEvents(broadcastTracker, frameEvents)
           if sim.phase == GameOver and sim.gameOverTimer <= 0:
-            if sim.endReason == reasonComplete and engine.hasAllGameLearnerOutage(sim):
-              echo "cogball: all-game learner provider/transport outage; marking episode failed"
+            let failure = engine.failedLearner(sim)
+            if sim.endReason == reasonComplete and failure.slot >= 0:
+              declarePlayerFailure(failure.slot, "Player did not submit any valid directives", failure.kind,
+                getMonoTime() + initDuration(seconds = 5))
               sim.endReason = reasonFault
               sim.endRule = erHostError
             # The `result` record is written at the very END, so its finalTick is

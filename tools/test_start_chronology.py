@@ -51,7 +51,9 @@ try:
     for process in processes: assert process.wait(timeout=60) == 0
     events = [json.loads(line) for line in (OUTPUT / "trajectory.jsonl").read_text().splitlines()]
     decisions, episode = events[:-1], events[-1]
-    assert episode["status"] == "completed" and len(decisions) == 4
+    assert len(decisions) == 4
+    assert episode["status"] == ("failed" if MODE == "first" else "completed")
+    assert (OUTPUT / "results.json").exists() == (MODE != "first")
     if MODE == "first":
         assert all(decision["selected_attempt_id"] is None for decision in decisions)
         assert all(not attempt["accepted"] for decision in decisions for attempt in decision["attempts"])

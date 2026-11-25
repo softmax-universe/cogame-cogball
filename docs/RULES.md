@@ -165,12 +165,7 @@ detail.
 
 ### Disconnects
 
-A seat that never connects does **not** end the episode. After
-`lobbyJoinTimeoutTicks` (2400 = 100 s) the no-show is reported to
-`COGAME_PLAYER_FAILURE_URI` and the match plays to full time with that seat
-recording missed turns (zero actuator masks, no implicit scripted fallback). A
-seat that drops mid-match similarly records missed turns with zero actuator
-masks until it reconnects.
+If a seat has not joined when the lobby expires, the game reports the missing seat and ends without scores. A player that drops mid-match can rejoin. The simulation records zero actuator masks for each missed turn. A model seat that submits no valid directive during an entire match receives an unscored failure.
 
 ## Determinism
 

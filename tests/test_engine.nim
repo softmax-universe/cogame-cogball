@@ -424,12 +424,7 @@ proc hostErrorIsAReachableEnding() =
 
   report "fault/host_error resolves engine scores without overwriting a finished verdict"
 
-proc neverConnectingSeatIsReportedAndPlaysOn() =
-  ## A seat that never connects does NOT end the episode: after
-  ## lobbyJoinTimeoutTicks the no-show is reported to COGAME_PLAYER_FAILURE_URI,
-  ## its trio is driven by `formation` for the whole match, and the match
-  ## reaches full time. Nothing exercised declarePlayerFailure before, so the
-  ## JSON shape the platform runner polls for was never asserted.
+proc neverConnectingSeatIsReported() =
   let path = tempPath("player-failure.json")
   removeFile(path)
   putEnv("COGAME_PLAYER_FAILURE_URI", "file://" & path)
@@ -451,7 +446,7 @@ proc neverConnectingSeatIsReportedAndPlaysOn() =
 
   let stuck = sim.nextPlayerSlot()
   doAssert stuck == 1, "the stuck slot is not the next open seat"
-  declarePlayerFailure(stuck, "player slot 1 never joined the lobby",
+  declarePlayerFailure(stuck, "player slot 1 never joined the lobby", "episode_inconclusive",
     getMonoTime() + initDuration(seconds = 1))
   doAssert fileExists(path),
     "no player-failure document was published to COGAME_PLAYER_FAILURE_URI"
@@ -460,41 +455,8 @@ proc neverConnectingSeatIsReportedAndPlaysOn() =
     "the failure was charged to the wrong seat: " & $failure
   doAssert failure["message"].getStr().len > 0, "the failure carries no reason"
 
-  # ...and the match still plays, on the scripted layer, to full time.
-  sim.startGame()
-  var directives: array[Seat, Directive]
-  var prev = newSeq[InputState](RobotCount)
-  var guard = 0
-  while sim.phase != GameOver and guard < config.maxTicks * 3:
-    inc guard
-    if sim.phase == Playing:
-      let elapsed = sim.tickCount - sim.gameStartTick
-      if elapsed mod sim.turnTicks() == 0 or
-          not (sim.hasDirective[Azure] and sim.hasDirective[Crimson]):
-        let turn = elapsed div sim.turnTicks()
-        for seat in Seat:
-          directives[seat] = sim.policyView().baselineDirective(seat, "formation", turn)
-          sim.activeDirective[seat] = directives[seat]
-          sim.hasDirective[seat] = true
-    let masks = sim.compileMasks(sim.activeDirective)
-    var inputs = newSeq[InputState](RobotCount)
-    for i in 0 ..< RobotCount:
-      inputs[i] = decodeInputMask(masks[i])
-    sim.step(inputs, prev)
-    prev = inputs
-  doAssert sim.phase == GameOver, "the match never ended"
-  doAssert sim.endReason == reasonComplete,
-    "a lobby no-show ended the episode " & reasonText(sim.endReason)
-  doAssert sim.endRule == erFullTime,
-    "expected full_time, got " & endRuleText(sim.endRule)
-  # The absent seat's trio was actuated the whole way, not left inert.
-  var moved = 0
-  for i in 0 ..< RobotCount:
-    if sim.robots[i].distanceUm > 0:
-      inc moved
-  doAssert moved == RobotCount,
-    "only " & $moved & " of six robots moved; a trio went inert"
-  report "a never-connecting seat is declared and the match reaches full_time"
+  doAssert failure["kind"].getStr() == "episode_inconclusive"
+  report "a never-connecting seat is declared"
 
 proc physicsGuardTripsAndLeavesAPartialReplay() =
   ## The note's test 6: "a raised physics guard yields fault/sim_fault with
@@ -629,7 +591,7 @@ proc outageClassification() =
   engine1.policies[Crimson] = SeatPolicy(kind: pkScripted, baseline: "formation", label: "formation", connected: true)
   engine1.turn(sim1, 0, 0)
   engine1.turn(sim1, 1, 0)
-  doAssert engine1.hasAllGameLearnerOutage(sim1),
+  doAssert engine1.failedLearner(sim1) == (ord(Azure), "episode_inconclusive"),
     "all-game transport outage was not flagged"
 
   var sim2 = playing(testConfig())
@@ -642,7 +604,7 @@ proc outageClassification() =
   engine2.policies[Crimson] = SeatPolicy(kind: pkScripted, baseline: "formation", label: "formation", connected: true)
   engine2.turn(sim2, 0, 0)
   engine2.turn(sim2, 1, 0)
-  doAssert not engine2.hasAllGameLearnerOutage(sim2),
+  doAssert engine2.failedLearner(sim2) == (ord(Azure), "player_error"),
     "parse_error should not be classified as provider/transport outage"
 
   var sim3 = playing(testConfig())
@@ -661,7 +623,7 @@ proc outageClassification() =
   engine3.policies[Crimson] = SeatPolicy(kind: pkScripted, baseline: "formation", label: "formation", connected: true)
   engine3.turn(sim3, 0, 0)
   engine3.turn(sim3, 1, 0)
-  doAssert not engine3.hasAllGameLearnerOutage(sim3),
+  doAssert engine3.failedLearner(sim3).slot < 0,
     "partial-turn outage with accepted turns should still complete normally"
   report "all-game learner transport outage is separated from parse_error and partial missed turns"
 
@@ -679,7 +641,7 @@ when isMainModule:
   scriptedSeatsNeverCallOut()
   mercyAndWallClock()
   hostErrorIsAReachableEnding()
-  neverConnectingSeatIsReportedAndPlaysOn()
+  neverConnectingSeatIsReported()
   physicsGuardTripsAndLeavesAPartialReplay()
   seatsAlwaysScoreToOne()
   disconnectKeepsPlaying()

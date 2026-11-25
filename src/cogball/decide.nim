@@ -423,15 +423,9 @@ proc turn*(
     engine.lastStats[seat] = sim.stats[seat]
   engine.lastGoals.setLen(0)
 
-proc hasAllGameLearnerOutage*(engine: TurnEngine, sim: SimServer): bool =
-  ## True when any LLM seat completed zero accepted turns and lost every
-  ## missed turn to provider/transport outage (not model parse errors).
-  ## Time legitimately advances on missed turns, but an all-game learner
-  ## outage is a failed evaluation rather than an ordinary scored completion.
+proc failedLearner*(engine: TurnEngine, sim: SimServer): tuple[slot: int, kind: string] =
   for seat in Seat:
-    if engine.policies[seat].kind == pkLlm and
-        sim.stats[seat].llmTurns == 0 and
-        engine.outageTurns[seat] > 0 and
-        engine.outageTurns[seat] == int(sim.stats[seat].fallbackTurns):
-      return true
-  false
+    if engine.policies[seat].kind == pkLlm and sim.stats[seat].llmTurns == 0 and
+        sim.stats[seat].fallbackTurns > 0:
+      return (ord(seat), if engine.outageTurns[seat] > 0: "episode_inconclusive" else: "player_error")
+  (-1, "")

@@ -197,8 +197,8 @@ for flow in (
                 for line in (output / "trajectory.jsonl").read_text().splitlines()
             ]
             decisions, episode = events[:-1], events[-1]
-            outage_flow = flow in {"provider-error", "malformed-200", "timeout"}
-            if outage_flow:
+            unscored_flow = flow in {"invalid", "provider-error", "malformed-200", "timeout"}
+            if unscored_flow:
                 assert (
                     episode["status"] == "failed"
                     and episode["outcome"]["reason"] == "fault"
